@@ -116,3 +116,22 @@ __global__ void rmsnorm_fwd_kernel(
         __syncthreads();
     }
 }
+
+// backward-pass kernel
+template <typename scalar_t>
+__global__ void rmsnorm_bwd_kernel(
+    const scalar_t* __restrict__ x,             // data
+    const scalar_t* __restrict__ dy,            // dL/dy grad
+    scalar_t* __restrict__ dx,                  // output dL/dx grad
+    const scalar_t* __restrict__ gamma,         // gamma weights 
+    scalar_t* __restrict__ dgamma,              // output dL/dgamma grad
+    int64_t seq_len, int64_t embedding_dim,     // input data sizes
+    float eps                                   // epsilon
+){
+    // smem allocation
+    extern __shared__ unsigned char smem[];
+
+    scalar_t* row_x = reinterpret_cast<scalar_t*>(smem);
+    float* warp_sums = reinterpret_cast<float*>(row_x + D);
+    float* warp_sums_dot = warp_sums + (blockDim.x + warpSize - 1)/ warpSize;
+}
