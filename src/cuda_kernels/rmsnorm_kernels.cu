@@ -283,13 +283,13 @@ torch::Tensor rmsnorm_forward(torch::Tensor x, torch::Tensor gamma, float eps){
 
     auto stream = torch::cuda::getCurrentCUDAStream();
 
-    AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, x_c.scalar_type(), "rmsnorm_fwd_launch", [&]{
+    AT_DISPATCH_FLOATING_TYPES_AND2(torch::kHalf, torch::kBFloat16, x_c.scalar_type(), "rmsnorm_fwd_launch", [&]{
         rmsnorm_fwd_kernel<scalar_t>
             <<<blocks, threads, smem, stream>>>(
                 x_c.data_ptr<scalar_t>(),
                 y.data_ptr<scalar_t>(),
                 g_c.data_ptr<scalar_t>(),
-                seq_len, D, static_cast<float>(eps)
+                seq_len, embedding_dim, static_cast<float>(eps)
             );
         }
     );
@@ -298,4 +298,49 @@ torch::Tensor rmsnorm_forward(torch::Tensor x, torch::Tensor gamma, float eps){
 }
 
 // backward wrapper
+std::tuple<torch::Tensor, torch::Tensor> rmsnorm_backward(
+    torch::Tensor x,
+    torch::Tensor dy,
+    torch::Tensor gamma,
+    float eps
+){
+    check_shapes_backward(x, dy, gamma);
 
+    auto x_c  = x.contiguous();
+    auto dy_c = dy.contiguous();
+
+    const auto seq_len = x_c.size(0);
+    const auto embedding_dim = x_c.size(1);
+
+    auto gamma_f32 = gamma.to(torch::kFloat).contiguous();
+
+    auto dx = torch::empty_like(x_c);
+    auto dgamma = torch::empty_like({embedding_dim}, x.options().dtype(torch::kFloat));
+
+    const int threads = choose_threads(embedding_dim);
+    const int blocks = std::min<int64_t>(seq_len, sizeof(uint16_t));
+    const int num_warps = (threads + 31) / 32;
+    const size_t smem = embedding_dim * x_c.element_size() + 2* num_warps * sizeof(float);
+
+    auto stream = torch::cuda::getCurrentCUDAStream();
+
+    AT_DISPATCH_FLOATING_TYPES_AND2(torch::kHalf, torch::kBFloat16, x_c.scalar_type(), "rmsnorm_bwd_launch", [&]{
+        rmsnorm_bwd_kernel<scalar_t>
+            <<<blocks, threads, smem, stream>>>(
+                x_c.data_ptr<scalar_t>(),
+                dy_c.data_ptr<scalar_t>(),
+                gamma_f32.data_ptr<float>(),
+                dx.data_ptr<scalar_t>(),
+                dgamma.data_ptr<float>(),
+                seq_len, embedding_dim, static_cast<float>(eps));
+    });
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return {dx, dgamma};
+}
+
+
+// python bindings
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m){
+    m.def("rmsnorm_forward", &rmsnorm_forward, "RMSNorm forward (Custom CUDA kernel)");
+    m.def("rmsnorm_backward", &rmsnorm_backward, "RMSNorm backward (Custom CUDA kernel)");
+}
