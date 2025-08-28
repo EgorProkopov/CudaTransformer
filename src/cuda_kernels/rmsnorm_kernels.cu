@@ -12,8 +12,9 @@
 #include <cuda_bf16.h>
 
 
-// -------------------------------------------//
 // device kernels and funcitons
+template <typename T> ъ
+__device__ __forceinline__ float to_float(T v){return static_cast<float>(v);} 
 __device__ __forceinline__ float to_float(float v){ return v;}
 __device__ __forceinline__ float to_float(__half v){ return __half2float(v);}
 __device__ __forceinline__ float to_float(__nv_bfloat16 v){ return __bfloat162float(v);}
@@ -26,7 +27,7 @@ __host__ __device__ __forceinline__ T from_float(float v) {
     else if constexpr (std::is_same_v<T, __half>)       return __float2half_rn(v);
     else if constexpr (std::is_same_v<T, __nv_bfloat16>)return __float2bfloat16(v);
     else {
-        static_assert(!std::is_same_v<T, T>, "from_float: unsupported T");
+        return static_cast<T>(v);
     }
 }
 
@@ -102,7 +103,7 @@ __global__ void rmsnorm_fwd_kernel(
         // rms calculation
         float inv_rms = 0.0f;
         if (threadIdx.x == 0){
-            float mean_sq = warp_sums[0] / to_float(embedding_dim);
+            float mean_sq = warp_sums[0] / static_cast<float>(embedding_dim);
             inv_rms = rsqrtf(mean_sq + eps);
             warp_sums[0] = inv_rms;  // threads broadcast
         }
@@ -286,9 +287,11 @@ torch::Tensor rmsnorm_forward(torch::Tensor x, torch::Tensor gamma, float eps){
 
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    AT_DISPATCH_FLOATING_TYPES_AND2(torch::kHalf, torch::kBFloat16, x_c.scalar_type(), "rmsnorm_fwd_launch", [&]{
-        rmsnorm_fwd_kernel<scalar_t>
-            <<<blocks, threads, smem, stream>>>(
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        x_c.scalar_type(),
+        "rmsnorm_fwd_launch", 
+        [&]{
+            rmsnorm_fwd_kernel<scalar_t> <<<blocks, threads, smem, stream>>>(
                 x_c.data_ptr<scalar_t>(),
                 y.data_ptr<scalar_t>(),
                 g_c.data_ptr<scalar_t>(),
@@ -328,9 +331,11 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_backward(
 
     auto stream = at::cuda::getCurrentCUDAStream();
 
-    AT_DISPATCH_FLOATING_TYPES_AND2(torch::kHalf, torch::kBFloat16, x_c.scalar_type(), "rmsnorm_bwd_launch", [&]{
-        rmsnorm_bwd_kernel<scalar_t>
-            <<<blocks, threads, smem, stream>>>(
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+        x_c.scalar_type(),
+        "rmsnorm_bwd_launch",
+        [&]{ 
+            rmsnorm_bwd_kernel<scalar_t> <<<blocks, threads, smem, stream>>>(
                 x_c.data_ptr<scalar_t>(),
                 dy_c.data_ptr<scalar_t>(),
                 dx.data_ptr<scalar_t>(),
