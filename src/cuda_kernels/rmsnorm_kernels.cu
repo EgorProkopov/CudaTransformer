@@ -6,6 +6,7 @@
 // includes 
 #include <torch/extension.h>
 #include <cuda_runtime.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -228,9 +229,10 @@ __global__ void rmsnorm_bwd_kernel(
 static inline void check_shapes_forward(const torch::Tensor& x, const torch::Tensor& gamma){
     TORCH_CHECK(x.is_cuda(), "x must be CUDA");
     TORCH_CHECK(gamma.is_cuda(), "gamma must be CUDA");
+    TORCH_CHECK(x.get_device() == gamma.get_device(), "x and gamma must be on the same CUDA device");
     
     TORCH_CHECK(x.dim() == 2, "x must be [seq_len, embedding_dim]");
-    TORCH_CHECK(gamma.dim() == 1, "gamma must be [embedding_dum]");
+    TORCH_CHECK(gamma.dim() == 1, "gamma must be [embedding_dim]");
 
     TORCH_CHECK(x.size(1) == gamma.size(0), "gamma.shape[0] must be equal to x.shape[1]");
 }
@@ -239,10 +241,14 @@ static inline void check_shapes_backward(const torch::Tensor& x, const torch::Te
     TORCH_CHECK(x.is_cuda(), "x must be CUDA");
     TORCH_CHECK(gamma.is_cuda(), "gamma must be CUDA");
     TORCH_CHECK(dy.is_cuda(), "dy must be CUDA");
+    TORCH_CHECK(
+        x.get_device() == gamma.get_device() && x.get_device() == dy.get_device(),
+         "x, gamma and dy must be on the same CUDA device"
+    );
 
     TORCH_CHECK(x.dim() == 2, "x must be [seq_len, embedding_dim]");
     TORCH_CHECK(dy.dim() == 2, "dy must be [seq_len, embedding_dim]");
-    TORCH_CHECK(gamma.dim() == 1, "gamma must be [embedding_dum]");
+    TORCH_CHECK(gamma.dim() == 1, "gamma must be [embedding_dim]");
 
     TORCH_CHECK(x.sizes() == dy.sizes(), "x and dy sizes mismatch");
     TORCH_CHECK(x.size(1) == gamma.size(0), "gamma.shape[0] must be equal to x.shape[1]");
@@ -255,13 +261,10 @@ static inline int choose_threads(int embedding_size){
     return 64;
 }
 
-static inline size_t smem_bytes_fwd(int num_warps, int64_t embedding_dim, size_t sizeofT) {
-    return embedding_dim * sizeofT + num_warps * sizeof(float);
-}
-
 // torch host wrapper
 // forward wrapper
 torch::Tensor rmsnorm_forward(torch::Tensor x, torch::Tensor gamma, float eps){
+    c10::cuda::CUDAGuard device_guard(x.device());
     check_shapes_forward(x, gamma);
     
     if (gamma.scalar_type() != x.scalar_type()) {
@@ -277,11 +280,11 @@ torch::Tensor rmsnorm_forward(torch::Tensor x, torch::Tensor gamma, float eps){
     auto y = torch::empty_like(x_c);
 
     const int threads = choose_threads(embedding_dim);
-    const int blocks = std::min<int64_t>(seq_len, sizeof(uint16_t));
+    const int blocks = std::min<int64_t>(seq_len, 65535);
     const int num_warps = (threads + 31) / 32;
     const size_t smem = embedding_dim * x_c.element_size() + num_warps * sizeof(float);
 
-    auto stream = torch::cuda::getCurrentCUDAStream();
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     AT_DISPATCH_FLOATING_TYPES_AND2(torch::kHalf, torch::kBFloat16, x_c.scalar_type(), "rmsnorm_fwd_launch", [&]{
         rmsnorm_fwd_kernel<scalar_t>
@@ -304,6 +307,7 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_backward(
     torch::Tensor gamma,
     float eps
 ){
+    c10::cuda::CUDAGuard device_guard(x.device());
     check_shapes_backward(x, dy, gamma);
 
     auto x_c  = x.contiguous();
@@ -315,26 +319,30 @@ std::tuple<torch::Tensor, torch::Tensor> rmsnorm_backward(
     auto gamma_f32 = gamma.to(torch::kFloat).contiguous();
 
     auto dx = torch::empty_like(x_c);
-    auto dgamma = torch::empty_like({embedding_dim}, x.options().dtype(torch::kFloat));
+    auto dgamma = torch::zeros({embedding_dim}, x.options().dtype(torch::kFloat));
 
     const int threads = choose_threads(embedding_dim);
-    const int blocks = std::min<int64_t>(seq_len, sizeof(uint16_t));
+    const int blocks = std::min<int64_t>(seq_len, 65535);
     const int num_warps = (threads + 31) / 32;
     const size_t smem = embedding_dim * x_c.element_size() + 2* num_warps * sizeof(float);
 
-    auto stream = torch::cuda::getCurrentCUDAStream();
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     AT_DISPATCH_FLOATING_TYPES_AND2(torch::kHalf, torch::kBFloat16, x_c.scalar_type(), "rmsnorm_bwd_launch", [&]{
         rmsnorm_bwd_kernel<scalar_t>
             <<<blocks, threads, smem, stream>>>(
                 x_c.data_ptr<scalar_t>(),
                 dy_c.data_ptr<scalar_t>(),
-                gamma_f32.data_ptr<float>(),
                 dx.data_ptr<scalar_t>(),
+                gamma_f32.data_ptr<float>(),
                 dgamma.data_ptr<float>(),
-                seq_len, embedding_dim, static_cast<float>(eps));
-    });
+                seq_len, embedding_dim,
+                static_cast<float>(eps)
+            );
+        }
+    );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+    auto dgamma_out = dgamma.to(gamma.dtype());
     return {dx, dgamma};
 }
 
