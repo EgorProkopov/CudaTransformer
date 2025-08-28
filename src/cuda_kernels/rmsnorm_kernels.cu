@@ -12,8 +12,8 @@
 #include <cuda_bf16.h>
 
 
-// device kernels and funcitons
-template <typename T> ъ
+// device kernels and functions
+template <typename T> 
 __device__ __forceinline__ float to_float(T v){return static_cast<float>(v);} 
 __device__ __forceinline__ float to_float(float v){ return v;}
 __device__ __forceinline__ float to_float(__half v){ return __half2float(v);}
