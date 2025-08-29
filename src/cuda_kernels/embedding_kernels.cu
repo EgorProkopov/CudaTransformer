@@ -9,9 +9,12 @@
 template <typename scalar_t>
 __global__ void embedding_fwd_kernel(
     const scalar_t* __restrict__ weights,
-    const int64_t vocab_size, const int64_t embedding_dim
+    const int64_t* __restrict__ indices,
+    scalar_t* __restrict__ out,
+    const int64_t vocab_size, const int64_t embedding_dim, 
+    const int64_t num_indices
 ){
-
+    
 }
 
 
@@ -22,5 +25,5 @@ __global__ void embedding_bwd_kernel(
     scalar_t* __restrict__ dweights,
     const int64_t vocab_size, const int64_t embedding_dim
 ){
-    
+
 }
