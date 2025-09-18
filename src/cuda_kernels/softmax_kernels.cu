@@ -44,7 +44,7 @@ __device__ __forceinline__ float warp_reduce_sum_fp32(float sum, unsigned mask){
 // 3. Вычисление глобального максимума строки через варп-редукцию
 // 4. Броадкаст полученного максимума по лейнам варпа
 // 5. Вычисление t_i = exp(x_i - row_max)
-// 6. Вычисление суммы (снова редукция) Z = sum_i(t_i)
+// 6. Вычисление суммы (снова редукция через варп) Z = sum_i(t_i)
 // 7. Вычисление результата y_i = t_i / Z
 
 __global__ void safe_softmax_fwd_fp32_kernel(
@@ -56,31 +56,55 @@ __global__ void safe_softmax_fwd_fp32_kernel(
     const int64_t warp_in_block_id = threadIdx.x / warpSize;
     const int64_t num_warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
 
-    const int64_t row_idx = blockIdx.x * warps_per_block + warp_in_block;
-    const int warps_in_grid = gridDim.x * warps_per_block;
+    const int64_t row_idx = blockIdx.x * num_warps_per_block + warp_in_block_id;
     
     const unsigned mask = __activemask();
 
     // no need in grid-stride, batch_size = 2^16 is too big to be possible
+    if (row_idx >= batch_size) {
+        return;
+    }
+
+    const int64_t stride = row_idx * seq_len;
 
     float lane_max = -CUDART_INF_F;
-    float lane_exp_sum = 0;
+    #pragma unroll 1
     for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
-        float value = x[row_idx  * seq_len + col_id];
-        lane_max = fmaxf(lane_max, value),
-
-        float exp_value = expf(value);
-        lane_exp_sum += exp_value;
+        float value = x[stride + col_id];
+        lane_max = fmaxf(lane_max, value);
     }
 
     // warp-reduction for row_max
     float row_max = warp_reduce_max_fp32(lane_max, mask);
-    // warp-reduction for exp_sum
-    float exp_sum = warp_reduce_sum_fp32(lane_exp_sum, mask);
 
     // lane 0 broadcast
     row_max = __shfl_sync(mask, row_max, 0);
-    exp_sum = __shfl_sync(mask, exp_sum, 0);
+
+    float lane_exp_sum = 0;
+    #pragma unroll 1
+    for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+        float value = x[stride + col_id];
+        float exp_value = __expf(value - row_max);
+        lane_exp_sum += exp_value;
+    }
+
+    // warp-reduction for sum
+    float row_exp_sum = warp_reduce_sum_fp32(lane_exp_sum, mask);
+    // lane 0 broadcast
+    row_exp_sum = __shfl_sync(mask, row_exp_sum, 0);
+    row_exp_sum += eps;
+    float inv_exp_sum = __fdividef(1.f, row_exp_sum);
+
+    #pragma unroll 1
+    for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+        // выгоднее 1 лишний раз прочесть x из GMEM и пересчитать exp, 
+        // чем записать y = exp(x-m) (запись в GMEM) и прочесть y из GMEM, 
+        // чтобы разделить на Z
+        float value = x[stride + col_id];
+        float exp_value = __expf(value - row_max); 
+
+        y[stride + col_id] = exp_value * inv_exp_sum;
+    }
 }
 
 
