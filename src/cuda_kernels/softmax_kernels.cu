@@ -1,8 +1,9 @@
 // includes 
-#include <torch/extension.h>
+// #include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include <math_constants.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
@@ -50,7 +51,9 @@ __device__ __forceinline__ float warp_reduce_sum_fp32(float sum, unsigned mask){
 __global__ void safe_softmax_fwd_fp32_kernel(
     const float* __restrict__ x,
     float* __restrict__ y,
-    int64_t batch_size, int64_t seq_len, float eps 
+    const int64_t batch_size,
+    const int64_t seq_len,
+    const float eps 
 ){
     const int64_t lane_id = threadIdx.x % warpSize;
     const int64_t warp_in_block_id = threadIdx.x / warpSize;
@@ -68,7 +71,7 @@ __global__ void safe_softmax_fwd_fp32_kernel(
     const int64_t stride = row_idx * seq_len;
 
     float lane_max = -CUDART_INF_F;
-    #pragma unroll 1
+    #pragma unroll 1  // to avoid register overflosw
     for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
         float value = x[stride + col_id];
         lane_max = fmaxf(lane_max, value);
@@ -109,7 +112,44 @@ __global__ void safe_softmax_fwd_fp32_kernel(
 
 
 // backward-pass kernel
+// Заметки по кернелу:
+// 1. Формула бэк пропа:
+// dx_j = y_j (dy_j - sum_i(dy_i * y_i))
+// 2. Нужен gradient checkpointing, так как считать y заново очень дорого
 
+// План кернела:
+// 1. Одну строку в батче обрабатывает один варп
+// 2. С помощью варп-редукции вычисляется суммма sum_i(dy_i * y_i)
+// 3. Сумма броадкастится на все лейны варпа
+// 4. Вычисляется dx, зная эту сумму
+__global__ void safe_softmax_bwd_fp32_kernel(
+    const float* __restrict__ y,
+    const float* __restrict__ dy,
+    float* __restrict__ dx,
+    const int64_t batch_size, const int64_t seq_len, const float eps 
+){
+    const int64_t lane_id = threadIdx.x % warpSize;
+    const int64_t warp_in_block_id = threadIdx.x / warpSize;
+    const int64_t num_sarps_per_block = (blockDim.x + warpSize - 1) / warpSize;
+
+    const int64_t row_idx = blockIdx.x * num_sarps_per_block + warp_in_block_id;
+
+    const unsigned mask = __activemask();
+
+    if (row_idx >= batch_size){
+        return;
+    }
+
+    const int64_t stride = row_idx * seq_len;
+
+    // 
+    float row_sum_ydy = 0;
+    #pragma unroll 1
+    for(){
+        
+    }
+
+}
 
 // host functions
 // utils
