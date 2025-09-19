@@ -122,17 +122,21 @@ __global__ void safe_softmax_fwd_fp32_kernel(
 // 2. С помощью варп-редукции вычисляется суммма sum_i(dy_i * y_i)
 // 3. Сумма броадкастится на все лейны варпа
 // 4. Вычисляется dx, зная эту сумму
+// итого 4 чтения и 1 запись. 
+// Дорого, но без gradient-checkpointing было бы еще дороже
+
 __global__ void safe_softmax_bwd_fp32_kernel(
-    const float* __restrict__ y,
-    const float* __restrict__ dy,
-    float* __restrict__ dx,
-    const int64_t batch_size, const int64_t seq_len, const float eps 
+    const float* __restrict__ y,          // fwd kernel output (grad checkpointing)
+    const float* __restrict__ dy,         // dL/dy
+    float* __restrict__ dx,               // dL/dx, output
+    const int64_t batch_size,             // batch size, obviously
+    const int64_t seq_len                 // sequence length
 ){
     const int64_t lane_id = threadIdx.x % warpSize;
     const int64_t warp_in_block_id = threadIdx.x / warpSize;
-    const int64_t num_sarps_per_block = (blockDim.x + warpSize - 1) / warpSize;
+    const int64_t num_warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
 
-    const int64_t row_idx = blockIdx.x * num_sarps_per_block + warp_in_block_id;
+    const int64_t row_idx = blockIdx.x * num_warps_per_block + warp_in_block_id;
 
     const unsigned mask = __activemask();
 
@@ -142,13 +146,24 @@ __global__ void safe_softmax_bwd_fp32_kernel(
 
     const int64_t stride = row_idx * seq_len;
 
-    // 
-    float row_sum_ydy = 0;
+    float lane_sum_ydy = 0;
     #pragma unroll 1
-    for(){
-        
+    for(int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+        float y_value = y[stride + col_id];
+        float dy_value = dy[stride + col_id];
+        lane_sum_ydy = fmaf(y_value, dy_value, lane_sum_ydy);
     }
 
+    // warp reduction sum
+    float row_sum_ydy = warp_reduce_sum_fp32(lane_sum_ydy, mask);
+    // lane 0 broadcasting
+    row_sum_ydy = __shfl_sync(mask, row_sum_ydy, 0);
+
+    // dx_j = y_j (dy_j - sum_i(dy_i * y_i))
+    #pragma unroll 1
+    for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+        dx[stride + col_id] = y[stride + col_id] * (dy[stride + col_id] - row_sum_ydy);
+    }
 }
 
 // host functions
