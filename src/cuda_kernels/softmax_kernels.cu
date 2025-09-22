@@ -237,8 +237,8 @@ torch::Tensor safe_softmax_forward_fp32(torch::Tensor x, float eps){
     auto stream at::cuda::getCurrentCUDAStream();
 
     safe_softmax_fwd_fp32_kernel<<<num_blocks, threads, 0, stream.stream()>>>(
-        x_c<float>.data_ptr(),
-        y<float>.data_ptr(),
+        x_c.data_ptr<float>(),
+        y.data_ptr<float>(),
         batch_size, seq_len, eps
     );
     
@@ -250,29 +250,29 @@ torch::Tensor safe_softmax_forward_fp32(torch::Tensor x, float eps){
 // torch backward wrapper
 torch::Tensor safe_softmax_backward_fp32(torch::Tensor y, torch::Tensor dy){
     c10::cuda::CUDAGuard device_guard(y.device());
-    check_device_forward(y, dy);
-    check_shape_forward(y, dy);
+    check_device_backward(y, dy);
+    check_shape_backward(y, dy);
     check_dtype_backward(y, dy);
 
     auto y_c = y.contiguous();
     auto dy_c = dy.contiguous();
 
     const auto batch_size = y_c.size(0);
-    const auto seq_len = y_c.size(0);
+    const auto seq_len = y_c.size(1);
     
     auto dx = torch::empty_like(x_c);
-    
+
     const int warp_size = 32;
     const int warps_per_block = 4;
     const int threads = warp_size * warps_per_block;
     const int num_blocks = (batch_size + warps_per_block - 1) / warps_per_block;
 
-    auto stream at::cuda::getCurrentCUDAStream();
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     safe_softmax_bwd_fp32_kernel<<<num_blocks, threads, 0, stream.stream()>>>(
-        y_c<float>.data_ptr(),
-        dy_c<float>.data_ptr(),
-        dx<float>.data_ptr(),
+        y_c.data_ptr<float>(),
+        dy_c.data_ptr<float>(),
+        dx.data_ptr<float>(),
         batch_size, seq_len
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
