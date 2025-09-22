@@ -234,7 +234,7 @@ torch::Tensor safe_softmax_forward_fp32(torch::Tensor x, float eps){
     const int threads = warp_size * warps_per_block;
     const int num_blocks = (batch_size + warps_per_block -1) / warps_per_block;
 
-    auto stream at::cuda::getCurrentCUDAStream();
+    auto stream = at::cuda::getCurrentCUDAStream();
 
     safe_softmax_fwd_fp32_kernel<<<num_blocks, threads, 0, stream.stream()>>>(
         x_c.data_ptr<float>(),
@@ -260,7 +260,7 @@ torch::Tensor safe_softmax_backward_fp32(torch::Tensor y, torch::Tensor dy){
     const auto batch_size = y_c.size(0);
     const auto seq_len = y_c.size(1);
     
-    auto dx = torch::empty_like(x_c);
+    auto dx = torch::empty_like(y_c);
 
     const int warp_size = 32;
     const int warps_per_block = 4;
@@ -281,3 +281,16 @@ torch::Tensor safe_softmax_backward_fp32(torch::Tensor y, torch::Tensor dy){
 
 
 // bindings
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("forward",
+          &safe_softmax_forward_fp32,
+          py::arg("x"),
+          py::arg("eps") = 1e-12f,
+          "Safe softmax forward (fp32, CUDA). Expects x[B, D]; returns y[B, D].");
+
+    m.def("backward",
+          &safe_softmax_backward_fp32,
+          py::arg("y"),
+          py::arg("dy"),
+          "Safe softmax backward (fp32, CUDA). Given y[B, D], dy[B, D] -> dx[B, D].");
+}
