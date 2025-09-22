@@ -286,11 +286,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           &safe_softmax_forward_fp32,
           py::arg("x"),
           py::arg("eps") = 1e-12f,
-          "Safe softmax forward (fp32, CUDA). Expects x[B, D]; returns y[B, D].");
+          "Safe softmax forward for fp32. Expects x with sizes (B, D), returns y with sizes (B, D).");
 
     m.def("backward",
           &safe_softmax_backward_fp32,
           py::arg("y"),
           py::arg("dy"),
-          "Safe softmax backward (fp32, CUDA). Given y[B, D], dy[B, D] -> dx[B, D].");
+          "Safe softmax backward for fp32. Expects y with sizes (B, D), returns dx with sizes (B, D)..");
 }
