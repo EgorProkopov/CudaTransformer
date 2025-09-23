@@ -52,15 +52,15 @@ __device__ __forceinline__ float warp_reduce_sum_fp32(float sum, unsigned mask){
 __global__ void safe_softmax_fwd_fp32_kernel(
     const float* __restrict__ x,
     float* __restrict__ y,
-    const int64_t batch_size,
-    const int64_t seq_len,
+    const int32_t batch_size,
+    const int32_t seq_len,
     const float eps 
 ){
-    const int64_t lane_id = threadIdx.x % warpSize;
-    const int64_t warp_in_block_id = threadIdx.x / warpSize;
-    const int64_t num_warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
+    const int32_t lane_id = threadIdx.x % warpSize;
+    const int32_t warp_in_block_id = threadIdx.x / warpSize;
+    const int32_t num_warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
 
-    const int64_t row_idx = blockIdx.x * num_warps_per_block + warp_in_block_id;
+    const int32_t row_idx = blockIdx.x * num_warps_per_block + warp_in_block_id;
     
     const unsigned mask = __activemask();
 
@@ -69,11 +69,11 @@ __global__ void safe_softmax_fwd_fp32_kernel(
         return;
     }
 
-    const int64_t stride = row_idx * seq_len;
+    const int32_t stride = row_idx * seq_len;
 
     float lane_max = -CUDART_INF_F;
     #pragma unroll 1  // to avoid register overflosw
-    for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+    for (int32_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
         float value = x[stride + col_id];
         lane_max = fmaxf(lane_max, value);
     }
@@ -86,7 +86,7 @@ __global__ void safe_softmax_fwd_fp32_kernel(
 
     float lane_exp_sum = 0;
     #pragma unroll 1
-    for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+    for (int32_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
         float value = x[stride + col_id];
         float exp_value = __expf(value - row_max);
         lane_exp_sum += exp_value;
@@ -100,7 +100,7 @@ __global__ void safe_softmax_fwd_fp32_kernel(
     float inv_exp_sum = __fdividef(1.f, row_exp_sum);
 
     #pragma unroll 1
-    for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+    for (int32_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
         // выгоднее 1 лишний раз прочесть x из GMEM и пересчитать exp, 
         // чем записать y = exp(x-m) (запись в GMEM) и прочесть y из GMEM, 
         // чтобы разделить на Z
@@ -130,14 +130,14 @@ __global__ void safe_softmax_bwd_fp32_kernel(
     const float* __restrict__ y,          // fwd kernel output (grad checkpointing)
     const float* __restrict__ dy,         // dL/dy
     float* __restrict__ dx,               // dL/dx, output
-    const int64_t batch_size,             // batch size, obviously
-    const int64_t seq_len                 // sequence length
+    const int32_t batch_size,             // batch size, obviously
+    const int32_t seq_len                 // sequence length
 ){
-    const int64_t lane_id = threadIdx.x % warpSize;
-    const int64_t warp_in_block_id = threadIdx.x / warpSize;
-    const int64_t num_warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
+    const int32_t lane_id = threadIdx.x % warpSize;
+    const int32_t warp_in_block_id = threadIdx.x / warpSize;
+    const int32_t num_warps_per_block = (blockDim.x + warpSize - 1) / warpSize;
 
-    const int64_t row_idx = blockIdx.x * num_warps_per_block + warp_in_block_id;
+    const int32_t row_idx = blockIdx.x * num_warps_per_block + warp_in_block_id;
 
     const unsigned mask = __activemask();
 
@@ -145,11 +145,11 @@ __global__ void safe_softmax_bwd_fp32_kernel(
         return;
     }
 
-    const int64_t stride = row_idx * seq_len;
+    const int32_t stride = row_idx * seq_len;
 
     float lane_sum_ydy = 0;
     #pragma unroll 1
-    for(int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+    for(int32_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
         float y_value = y[stride + col_id];
         float dy_value = dy[stride + col_id];
         lane_sum_ydy = fmaf(y_value, dy_value, lane_sum_ydy);
@@ -162,7 +162,7 @@ __global__ void safe_softmax_bwd_fp32_kernel(
 
     // dx_j = y_j (dy_j - sum_i(dy_i * y_i))
     #pragma unroll 1
-    for (int64_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
+    for (int32_t col_id = lane_id; col_id < seq_len; col_id += warpSize){
         dx[stride + col_id] = y[stride + col_id] * (dy[stride + col_id] - row_sum_ydy);
     }
 }
@@ -224,15 +224,15 @@ torch::Tensor safe_softmax_forward_fp32(torch::Tensor x, float eps){
 
     auto x_c = x.contiguous();
     
-    const auto batch_size = x_c.size(0);
-    const auto seq_len = x_c.size(1);
+    const int32_t batch_size = static_cast<int32_t>(x_c.size(0));
+    const int32_t seq_len = static_cast<int32_t>(x_c.size(1));
 
     auto y = torch::empty_like(x_c);
 
-    const int warp_size = 32;
-    const int warps_per_block = 4;
-    const int threads = warp_size * warps_per_block;
-    const int num_blocks = (batch_size + warps_per_block -1) / warps_per_block;
+    const int32_t warp_size = 32;
+    const int32_t warps_per_block = 4;
+    const int32_t threads = warp_size * warps_per_block;
+    const int32_t num_blocks = (batch_size + warps_per_block -1) / warps_per_block;
 
     auto stream = at::cuda::getCurrentCUDAStream();
 

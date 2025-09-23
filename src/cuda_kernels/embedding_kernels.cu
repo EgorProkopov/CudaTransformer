@@ -6,24 +6,22 @@
 
 
 // device kernels and funcitons
-template <typename scalar_t>
 __global__ void embedding_fwd_kernel(
-    const scalar_t* __restrict__ weights,
-    const int64_t* __restrict__ indices,
-    scalar_t* __restrict__ out,
-    const int64_t vocab_size, const int64_t embedding_dim, 
-    const int64_t num_indices
+    const float* __restrict__ weights,
+    const int32_t* __restrict__ indices,
+    float* __restrict__ out,
+    const int32_t vocab_size, const int32_t embedding_dim, 
+    const int32_t num_indices
 ){
     
 }
 
 
-template <typename scalar_t>
 __global__ void embedding_bwd_kernel(
-    const scalar_t* __restrict__ weights,
-    const scalar_t* __restrict__ dy,
-    scalar_t* __restrict__ dweights,
-    const int64_t vocab_size, const int64_t embedding_dim
+    const float* __restrict__ weights,
+    const float* __restrict__ dy,
+    float* __restrict__ dweights,
+    const int32_t vocab_size, const int32_t embedding_dim
 ){
 
 }
