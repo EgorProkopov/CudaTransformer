@@ -7,7 +7,7 @@ from src.modules.softmax import SafeSoftmax
 
 
 WARM_UP_RUNS = 50
-ITERATIONS = 200
+ITERATIONS = 1000
 
 
 def benchmark_gpu(function):
@@ -101,7 +101,7 @@ def custom_softmax_backward_benchmarks(dy: torch.Tensor, x: torch.Tensor) -> flo
 
 if __name__ == "__main__":
     torch.manual_seed(239)
-    B, D = 128, 4096
+    B, D = 1024, 256
 
     x  = torch.randn(B, D, device="cuda", dtype=torch.float32)
     dy = torch.randn_like(x)
@@ -112,11 +112,11 @@ if __name__ == "__main__":
 
     ms_t_fwd, y_t = torch_softmax_forward_benchmarks(x)
     ms_c_fwd, y_c = custom_softmax_forward_benchmarks(x)
-    print(f"torch  forward: {ms_t_fwd:.3f} ms")
+    print(f"torch forward: {ms_t_fwd:.3f} ms")
     print(f"custom forward: {ms_c_fwd:.3f} ms, max|diff|={ (y_t - y_c).abs().max().item():.3e}")
 
     ms_t_bwd, dx_t = torch_softmax_backward_benchmarks(dy, y_t)
     ms_c_bwd = custom_softmax_backward_benchmarks(dy, x)
-    print(f"torch  backward: {ms_t_bwd:.3f} ms")
+    print(f"torch backward: {ms_t_bwd:.3f} ms")
     print(f"custom backward: {ms_c_bwd:.3f} ms")
     
