@@ -36,8 +36,8 @@ class SafeSoftmaxFunction(torch.autograd.Function):
             raise RuntimeError("Safe-Softmax: CUDA tensor was expected")
         if x.dtype != torch.float32:
             raise RuntimeError("Safe-Softmax: Current softmax kernel supports only fp32 data")
-        if x.dim != 2:
-            raise RuntimeError(f"Safe-Softmax: expected input data to has shape [batch_size, seq_len], but got {tuple(x.shape)}")
+        if x.dim() != 2:
+            raise RuntimeError(f"Safe-Softmax: expected input data to has shape [batch_size, seq_len], but got {tuple(x.shape)} with dim {x.dim()}")
 
         x_2d = x.contiguous()
         y_2d = _safe_softmax_extension.forward(x_2d, float(eps))  # runs forward pass
@@ -69,22 +69,3 @@ class SafeSoftmax(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return SafeSoftmaxFunction.apply(x, self.dim, self.eps)
-
-
-if __name__ == "__main__":
-    # Быстрый sanity-check
-    torch.manual_seed(0)
-    x = torch.randn(4, 1024, device="cuda", dtype=torch.float32, requires_grad=True)
-    sm = SafeSoftmax(dim=-1, eps=1e-12)
-
-    y = sm(x)
-    assert y.shape == x.shape
-    # проверка сумм по dim
-    s = y.sum(dim=-1)
-    print("sum close to 1:", torch.allclose(s, torch.ones_like(s), atol=1e-5))
-
-    g = torch.randn_like(y)
-    # сравнение градиента с PyTorch эталоном
-    dx_ref = torch.autograd.grad((torch.nn.functional.softmax(x, dim=-1) * g).sum(), x, retain_graph=True)[0]
-    dx = torch.autograd.grad((y * g).sum(), x)[0]
-    print("max |diff|:", (dx - dx_ref).abs().max().item())
