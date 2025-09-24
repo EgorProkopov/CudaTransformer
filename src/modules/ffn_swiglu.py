@@ -35,9 +35,17 @@ class FFNSwiGLUv1Function(torch.autograd.Function):
         ctx, x: torch.Tensor,
         W_gate: torch.Tensor, b_gate: torch.Tensor,
         W_in: torch.Tensor, b_in: torch.Tensor,
-        W_out: torch.Tensor, b_out: torch.Tensor
-    ):
-        pass
+        W_out: torch.Tensor, b_out: torch.Tensor,
+        p: float,
+        seed: int
+    ) -> torch.Tensor:
+        y = _ffn_swiglu_extension.forward_v1(
+            x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
+        )
+        ctx.save_for_backward()
+        ctx.p = p
+        ctx.seed = seed
+        return y
 
     @staticmethod
     def backward(
@@ -55,7 +63,13 @@ class FFNSwiGLUv2Function(torch.autograd.Function):
         W_in: torch.Tensor, b_in: torch.Tensor,
         W_out: torch.Tensor, b_out: torch.Tensor
     ):
-        pass
+        y = _ffn_swiglu_extension.forward_v2(
+            x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
+        )
+        ctx.save_for_backward()
+        ctx.p = p
+        ctx.seed = seed
+        return y
 
     @staticmethod
     def backward(
@@ -65,18 +79,57 @@ class FFNSwiGLUv2Function(torch.autograd.Function):
 
 
 class FFNSwiGLUv1(nn.Module):
-    def __init__(self, ):
+    def __init__(self, embedding_dim: int, hidden_dim: int, p: float = 0.0, seed: int = 239):
         super().__init__()
+        self.embedding_dim = int(embedding_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.p = float(p)
+        self.seed = int(seed)
+
+        self.W_gate = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim))
+        self.b_gate = nn.Parameter(torch.zeros(self.hidden_dim))
+        self.W_in = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim))
+        self.b_in = nn.Parameter(torch.zeros(self.hidden_dim))
+        self.W_out = nn.Parameter(torch.empty(self.hidden_dim, self.embedding_dim))
+        self.b_out = nn.Parameter(torch.zeros(self.embedding_dim))
+
+        nn.init.xavier_uniform_(self.W_gate)
+        nn.init.xavier_uniform_(self.W_in)
+        nn.init.xavier_uniform_(self.W_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
+        if self.training and self.p > 0.0: p = self.p
+        else: p = 0.0
+        return FFNSwiGLUv1Function.apply(
+            x, self.W_gate, self.b_gate, self.W_in, self.b_in, self.W_out, self.b_out,
+            float(p), int(self.seed)
+        )
 
 
-class FFNSwiGLUv1(nn.Module):
-    def __init__(self, ):
+class FFNSwiGLUv2(nn.Module):
+    def __init__(self, embedding_dim: int, hidden_dim: int, p: float = 0.0, seed: int = 239):
         super().__init__()
+        self.embedding_dim = int(embedding_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.p = float(p)
+        self.seed = int(seed)
+
+        self.W_gate = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim))
+        self.b_gate = nn.Parameter(torch.zeros(self.hidden_dim))
+        self.W_in = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim))
+        self.b_in = nn.Parameter(torch.zeros(self.hidden_dim))
+        self.W_out = nn.Parameter(torch.empty(self.hidden_dim, self.embedding_dim))
+        self.b_out = nn.Parameter(torch.zeros(self.embedding_dim))
+
+        nn.init.xavier_uniform_(self.W_gate)
+        nn.init.xavier_uniform_(self.W_in)
+        nn.init.xavier_uniform_(self.W_out)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
+        if self.training and self.p > 0.0: p = self.p
+        else: p = 0.0
+        return FFNSwiGLUv2Function.apply(
+            x, self.W_gate, self.b_gate, self.W_in, self.b_in, self.W_out, self.b_out,
+            float(p), int(self.seed)
+        )
 
-        
