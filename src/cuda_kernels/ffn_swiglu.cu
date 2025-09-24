@@ -627,9 +627,152 @@ torch::Tensor ffn_forward_fp32_kernel_v1(
     return y.view({batch_size, seq_len, embedding_dim});
 }
 
+// fwd v2 wrapper
+torch::Tensor ffn_forward_fp32_kernel_v2(
+    torch::Tensor x, 
+    
+    torch::Tensor W_gate,
+    torch::Tensor b_gate,
+    torch::Tensor W_in,
+    torch::Tensor b_in,
+    torch::Tensor W_out,
+    torch::Tensor b_out,
+
+    const float p,
+    const uint32_t seed
+){
+    c10::cuda::CUDAGuard device_guard(x.device());
+    check_device_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+    check_shape_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+    check_is_float_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+
+    TORCH_CHECK(p >= 0.f && p < 1.f, "dropout p must be in [0,1), got ", p);
+
+    auto x_c = x.contiguous();
+
+    auto W_gate_c = W_gate.contiguous();
+    auto b_gate_c = b_gate.contiguous();
+
+    auto W_in_c = W_in.contiguous();
+    auto b_in_c = b_in.contiguous();
+
+    auto W_out_c = W_out.contiguous();
+    auto b_out_c = b_out.contiguous();
+
+    const uint32_t batch_size = x_c.size(0);
+    const uint32_t seq_len = x_c.size(1);
+    const uint32_t embedding_dim = x_c.size(2);
+    const uint32_t hidden_dim = W_gate_c.size(1);
+
+    const uint32_t num_vectors = batch_size * seq_len;
+
+    // x_c_reshaped = torch.reshape(x_c, (num_vectors, embedding_dim));
+    auto x2d = x_c.view({num_vectors, embedding_dim}); 
+    auto z = torch::empty({num_vectors, hidden_dim}, x_c.options());
+    auto y = torch::empty({num_vectors, embedding_dim}, x_c.options());
+
+    // dropout masks
+    torch::Tensor mask1, mask2;
+    uint8_t* mask1_ptr = nullptr;
+    uint8_t* mask2_ptr = nullptr;
+
+    if (p > 0.f) {
+        mask1 = torch::empty({num_vectors, hidden_dim}, x_c.options().dtype(torch::kUInt8));
+        mask2 = torch::empty({num_vectors, embedding_dim}, x_c.options().dtype(torch::kUInt8));
+        mask1_ptr = mask1.data_ptr<uint8_t>();
+        mask2_ptr = mask2.data_ptr<uint8_t>();
+    }
+
+    // launch configs
+    dim3 block1(BLOCK_SIZE * BLOCK_SIZE);
+    dim3 grid1(
+        (hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
+        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+    );
+    dim3 block2(BLOCK_SIZE * BLOCK_SIZE);
+    dim3 grid2(
+        (embedding_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
+        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+    );
+
+    // Philox offsets
+    // first kernel uses [0 .. ceil(num_vectors*hidden_dim/4)-1], second one starts from offset2
+    const uint64_t n1 = static_cast<uint64_t>(num_vectors) * static_cast<uint64_t>(hidden_dim);
+    const uint32_t offset1 = 0;
+    const uint32_t offset2 = static_cast<uint32_t>((n1 + 4 - 1) / 4);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+    ffn_swiglu_dropout_fp32_kernel_v2<<<grid1, block1, 0, stream>>>(
+        x2d.data_ptr<float>(),
+        z.data_ptr<float>(),
+        W_gate_c.data_ptr<float>(), b_gate_c.data_ptr<float>(),
+        W_in_c.data_ptr<float>(),   b_in_c.data_ptr<float>(),
+        mask1_ptr, p, seed, offset1,
+        num_vectors, embedding_dim, hidden_dim
+    );
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: 1st kernel launch failed");
+
+    ffn_residual_dropout_fp32_kernel_v2<<<grid2, block2, 0, stream>>>(
+        x2d.data_ptr<float>(),
+        z.data_ptr<float>(),
+        y.data_ptr<float>(),
+
+        W_out_c.data_ptr<float>(),   b_out_c.data_ptr<float>(),
+        mask2_ptr, p, seed, offset2,
+        num_vectors, embedding_dim, hidden_dim
+    );
+
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: 2nd kernel launch failed");
+
+    return y.view({batch_size, seq_len, embedding_dim});
+}
 
 // backward wrapper
 
 
 
 // bindings
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def(
+        "forward_v1",
+        &ffn_forward_fp32_kernel_v1,
+        py::arg("x"),
+        py::arg("W_gate"),
+        py::arg("b_gate"),
+
+        py::arg("W_in"),
+        py::arg("b_in"),
+
+        py::arg("W_out"),
+        py::arg("b_out"),
+
+        py::arg("p") = 0.3,
+        py::arg("seed") = 239,
+        "FFN+SwiGLU with naive GEMM realization"
+    );
+
+    m.def(
+        "forward_v2",
+        &ffn_forward_fp32_kernel_v2,
+        py::arg("x"),
+        py::arg("W_gate"),
+        py::arg("b_gate"),
+
+        py::arg("W_in"),
+        py::arg("b_in"),
+
+        py::arg("W_out"),
+        py::arg("b_out"),
+
+        py::arg("p") = 0.3,
+        py::arg("seed") = 239,
+        "FFN+SwiGLU with coalesced memory access GEMM realization"
+    );
+}
