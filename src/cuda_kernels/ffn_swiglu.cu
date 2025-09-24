@@ -9,10 +9,6 @@
 #include <cuda_bf16.h>
 
 
-#ifndef CHECK_CUDA_ERROR
-#define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
-#endif
-
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 32
 #endif
@@ -374,25 +370,6 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
 // ===========================================================================
 // =========================== host-functions ================================
 // ===========================================================================
-
-__host__ inline void check(
-    cudaError_t err, 
-    const char* const func,
-        const char* const file,
-    const int line
-){
-    if (err != cudaSuccess){
-        fprintf(
-            stderr, 
-            "CUDA error at %s:%d code=%d (%s) \"%s\"\n",
-            file, line,
-            static_cast<int>(err),
-            cudaGetErrorString(err), func  
-        );
-        exit(EXIT_FAILURE);
-    }
-}
-
 // forward
 static inline void check_device_forward(
     const torch::Tensor& x,
@@ -543,7 +520,7 @@ static inline void check_is_float_forward(
 // ===========================================================================
 // =========================== torch wrappers ================================
 // ===========================================================================
-// forward wrapper
+// fwd v1 wrapper
 torch::Tensor ffn_forward_fp32_kernel_v1(
     torch::Tensor x, 
     
@@ -573,7 +550,7 @@ torch::Tensor ffn_forward_fp32_kernel_v1(
     auto x_c = x.contiguous();
 
     auto W_gate_c = W_gate.contiguous();
-    auto b_gate_c = W_gate.contiguous();
+    auto b_gate_c = b_gate.contiguous();
 
     auto W_in_c = W_in.contiguous();
     auto b_in_c = b_in.contiguous();
@@ -591,7 +568,7 @@ torch::Tensor ffn_forward_fp32_kernel_v1(
     // x_c_reshaped = torch.reshape(x_c, (num_vectors, embedding_dim));
     auto x2d = x_c.view({num_vectors, embedding_dim}); 
     auto z = torch::empty({num_vectors, hidden_dim}, x_c.options());
-    auto y = torch::empty({num_vectors, embedding_dim});
+    auto y = torch::empty({num_vectors, embedding_dim}, x_c.options());
 
     // dropout masks
     torch::Tensor mask1, mask2;
@@ -611,7 +588,7 @@ torch::Tensor ffn_forward_fp32_kernel_v1(
         (hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
         (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
     );
-    dim3 block2(BLOCK_SIZE * BLOCK_SIZE);
+    dim3 block2(BLOCK_SIZE, BLOCK_SIZE);
     dim3 grid2(
         (embedding_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
         (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
@@ -633,8 +610,7 @@ torch::Tensor ffn_forward_fp32_kernel_v1(
         mask1_ptr, p, seed, offset1,
         num_vectors, embedding_dim, hidden_dim
     );
-
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: 1st kernel launch failed");
 
     ffn_residual_dropout_fp32_kernel_v1<<<grid2, block2, 0, stream>>>(
         x2d.data_ptr<float>(),
@@ -646,7 +622,7 @@ torch::Tensor ffn_forward_fp32_kernel_v1(
         num_vectors, embedding_dim, hidden_dim
     );
 
-    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: kernel launch failed");
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: 2nd kernel launch failed");
 
     return y.view({batch_size, seq_len, embedding_dim});
 }
