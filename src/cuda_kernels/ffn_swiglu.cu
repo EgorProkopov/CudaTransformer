@@ -744,17 +744,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "forward_v1",
         &ffn_forward_fp32_kernel_v1,
         py::arg("x"),
-        py::arg("W_gate"),
-        py::arg("b_gate"),
-
-        py::arg("W_in"),
-        py::arg("b_in"),
-
-        py::arg("W_out"),
-        py::arg("b_out"),
-
-        py::arg("p") = 0.3,
-        py::arg("seed") = 239,
+        py::arg("W_gate"), py::arg("b_gate"),
+        py::arg("W_in"), py::arg("b_in"),
+        py::arg("W_out"), py::arg("b_out"),
+        py::arg("p") = 0.3, py::arg("seed") = 239,
         "FFN+SwiGLU with naive GEMM realization"
     );
 
@@ -762,17 +755,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "forward_v2",
         &ffn_forward_fp32_kernel_v2,
         py::arg("x"),
-        py::arg("W_gate"),
-        py::arg("b_gate"),
-
-        py::arg("W_in"),
-        py::arg("b_in"),
-
-        py::arg("W_out"),
-        py::arg("b_out"),
-
-        py::arg("p") = 0.3,
-        py::arg("seed") = 239,
+        py::arg("W_gate"), py::arg("b_gate"),
+        py::arg("W_in"), py::arg("b_in"),
+        py::arg("W_out"), py::arg("b_out"),
+        py::arg("p") = 0.3, py::arg("seed") = 239,
         "FFN+SwiGLU with coalesced memory access GEMM realization"
     );
 }
