@@ -14,7 +14,10 @@ setup.py            # Setup file
 ## Realization
 
 - RMSNorm: rmsnorm implemented with shared memory buffer and double warp-reductions for squared root calculation in both forward and backward pass kernels and for dot product sum in backward pass kernel.
-- Safe Softmax: work in progress
+- Safe Softmax: softmax implemented with max calculation and substraction for numerical stability and to prevent
+  - Realized only for fp32
+  - Realized via warp-on-row calculation
+  - TODO: realize for fp16/bf16 with vectorized memory access and block-on-row calculation  
 - Embeddings layer: work in progress
 - FFN with SwiGLU: work in progress
 - MLA with RoPE: work in progress
