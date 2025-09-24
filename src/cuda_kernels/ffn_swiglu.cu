@@ -1,4 +1,4 @@
-// #include <torch/extension.h>
+#include <torch/extension.h>
 #include <cuda_runtime.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -8,6 +8,10 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
+
+#ifndef CHECK_CUDA_ERROR
+#define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
+#endif
 
 #ifndef BLOCK_SIZE
 #define BLOCK_SIZE 32
@@ -370,8 +374,166 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
 // ===========================================================================
 // =========================== host-functions ================================
 // ===========================================================================
-// forward
 
+__host__ inline void check(
+    cudaError_t err, 
+    const char* const func,
+        const char* const file,
+    const int line
+){
+    if (err != cudaSuccess){
+        fprintf(
+            stderr, 
+            "CUDA error at %s:%d code=%d (%s) \"%s\"\n",
+            file, line,
+            static_cast<int>(err),
+            cudaGetErrorString(err), func  
+        );
+        exit(EXIT_FAILURE);
+    }
+}
+
+// forward
+static inline void check_device_forward(
+    const torch::Tensor& x,
+    const torch::Tensor& W_gate,
+    const torch::Tensor& b_gate,
+    const torch::Tensor& W_in,
+    const torch::Tensor& b_in,
+    const torch::Tensor& W_out,
+    const torch::Tensor& b_out
+){
+    TORCH_CHECK(x.is_cuda(), "Input data (x) must be CUDA");
+
+    TORCH_CHECK(W_gate.is_cuda(), "Weights (W_gate) must be CUDA");
+    TORCH_CHECK(b_gate.is_cuda(), "Weights (b_gate) must be CUDA");
+
+    TORCH_CHECK(W_in.is_cuda(), "Weights (W_in) must be CUDA");
+    TORCH_CHECK(b_in.is_cuda(), "Weights (b_in) must be CUDA");
+
+    TORCH_CHECK(W_out.is_cuda(), "Weights (W_out) must be CUDA");
+    TORCH_CHECK(b_out.is_cuda(), "Weights (b_out) must be CUDA");
+
+    TORCH_CHECK(
+        (
+            W_gate.get_device() == b_gate.get_device() && 
+            W_in.get_device() == b_in.get_device() && 
+            W_out.get_device() == b_out.get_device() && 
+            W_gate.get_device() == W_in.get_device() && 
+            W_in.get_device() == W_out.get_device() && 
+            b_gate.get_device() == b_in.get_device() && 
+            b_in.get_device() == b_out.get_device()
+        ),
+        "All weights must be on the same device"
+    );
+
+    TORCH_CHECK(
+        x.get_device() == W_in.get_device(), "Weights and data must be on the same device"
+    );
+}
+
+static inline void check_shape_forward(
+    const torch::Tensor& x,
+    const torch::Tensor& W_gate,
+    const torch::Tensor& b_gate,
+    const torch::Tensor& W_in,
+    const torch::Tensor& b_in,
+    const torch::Tensor& W_out,
+    const torch::Tensor& b_out
+){
+    // check data shape
+    TORCH_CHECK(
+        x.dim() == 3, 
+        "Input data (x) must be 3 dim: [batch_size, seq_len, embedding_dim], but dim=", x.dim()
+    );
+    
+    // check weights shapes
+    TORCH_CHECK(
+        W_gate.dim() == 2, 
+        "Weights (W_gate) must be 2 dim: [embedding_dim, hidden_dim], but dim=", W_gate.dim()
+    );
+    TORCH_CHECK(
+        b_gate.dim() == 1, 
+        "Weights (b_gate) must be 1 dim: [hidden_dim], but dim=", b_gate.dim()
+    );
+
+    TORCH_CHECK(
+        W_in.dim() == 2, 
+        "Weights (W_in) must be 2 dim: [embedding_dim, hidden_dim], but dim=", W_in.dim()
+    );
+    TORCH_CHECK(
+        b_in.dim() == 1, 
+        "Weights (b_in) must be 1 dim: [hidden_dim], but dim=", b_in.dim()
+    );
+
+    TORCH_CHECK(
+        W_out.dim() == 2, 
+        "Weights (W_out) must be 2 dim: [hidden_dim, embedding_dim], but dim=", W_out.dim()
+    );
+    TORCH_CHECK(
+        b_out.dim() == 1, 
+        "Weights (b_out) must be 1 dim: [embedding_dim], but dim=", b_out.dim()
+    );
+
+    // check weights dimensions
+    TORCH_CHECK(
+        W_in.size(1) == W_gate.size(1), "W_in.shape[1] must be hidden_size=", W_gate.size(1), ", got ", W_in.size(1)
+    );
+    TORCH_CHECK(
+        b_gate.size(0) == W_gate.size(1), "b_gate.shape must be hidden_size=", W_gate.size(1), ", got ", b_gate.sizes()
+    );
+    TORCH_CHECK(
+        b_in.size(0) == W_gate.size(1), "b_in.shape must be hidden_size=", W_gate.size(1), ", got ", b_in.sizes()
+    );
+
+    TORCH_CHECK(
+        W_out.size(0) == W_gate.size(1),
+        "W_out.shape[0] must equal hidden_dim=", W_gate.size(1), ", got ", W_out.size(0)
+    );
+    TORCH_CHECK(
+        W_out.size(1) == W_in.size(0),
+        "W_out.shape[1] must equal embedding_dim=", W_in.size(0), ", got ", W_out.size(1)
+    );
+    TORCH_CHECK(
+        b_out.size(0) == W_in.size(0),
+        "b_out.shape must equal embedding_dim=", W_in.size(0), ", got ", b_out.sizes()
+    );
+}
+
+static inline void check_is_float_forward(
+    const torch::Tensor& x,
+    const torch::Tensor& W_gate,
+    const torch::Tensor& b_gate,
+    const torch::Tensor& W_in,
+    const torch::Tensor& b_in,
+    const torch::Tensor& W_out,
+    const torch::Tensor& b_out
+){
+    TORCH_CHECK(
+        x.scalar_type() == at::kFloat, "Input (x) must be float32, but got=", x.scalar_type()
+    );
+
+    TORCH_CHECK(
+        W_gate.scalar_type() == at::kFloat, "Weights (W_gate) must be float32, but got=", W_gate.scalar_type()
+    );
+    TORCH_CHECK(
+        b_gate.scalar_type() == at::kFloat, "Weights (b_gate) must be float32, but got=", b_gate.scalar_type()
+    );
+
+    TORCH_CHECK(
+        W_in.scalar_type() == at::kFloat, "Weights (W_in) must be float32, but got=", W_in.scalar_type()
+    );
+    TORCH_CHECK(
+        b_in.scalar_type() == at::kFloat, "Weights (b_in) must be float32, but got=", b_in.scalar_type()
+    );
+
+    TORCH_CHECK(
+        W_out.scalar_type() == at::kFloat, "Weights (W_out) must be float32, but got=", W_out.scalar_type()
+    );
+    TORCH_CHECK(
+        b_out.scalar_type() == at::kFloat, "Weights (b_out) must be float32, but got=", b_out.scalar_type()
+    );
+}
 
 
 // backward
@@ -382,7 +544,112 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
 // =========================== torch wrappers ================================
 // ===========================================================================
 // forward wrapper
+torch::Tensor ffn_forward_fp32_kernel_v1(
+    torch::Tensor x, 
+    
+    torch::Tensor W_gate,
+    torch::Tensor b_gate,
+    torch::Tensor W_in,
+    torch::Tensor b_in,
+    torch::Tensor W_out,
+    torch::Tensor b_out,
 
+    const float p,
+    const uint32_t seed
+){
+    c10::cuda::CUDAGuard device_guard(x.device());
+    check_device_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+    check_shape_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+    check_is_float_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+
+    TORCH_CHECK(p >= 0.f && p < 1.f, "dropout p must be in [0,1), got ", p);
+
+    auto x_c = x.contiguous();
+
+    auto W_gate_c = W_gate.contiguous();
+    auto b_gate_c = W_gate.contiguous();
+
+    auto W_in_c = W_in.contiguous();
+    auto b_in_c = b_in.contiguous();
+
+    auto W_out_c = W_out.contiguous();
+    auto b_out_c = b_out.contiguous();
+
+    const uint32_t batch_size = x_c.size(0);
+    const uint32_t seq_len = x_c.size(1);
+    const uint32_t embedding_dim = x_c.size(2);
+    const uint32_t hidden_dim = W_gate_c.size(1);
+
+    const uint32_t num_vectors = batch_size * seq_len;
+
+    // x_c_reshaped = torch.reshape(x_c, (num_vectors, embedding_dim));
+    auto x2d = x_c.view({num_vectors, embedding_dim}); 
+    auto z = torch::empty({num_vectors, hidden_dim}, x_c.options());
+    auto y = torch::empty({num_vectors, embedding_dim});
+
+    // dropout masks
+    torch::Tensor mask1, mask2;
+    uint8_t* mask1_ptr = nullptr;
+    uint8_t* mask2_ptr = nullptr;
+
+    if (p > 0.f) {
+        mask1 = torch::empty({num_vectors, hidden_dim}, x_c.options().dtype(torch::kUInt8));
+        mask2 = torch::empty({num_vectors, embedding_dim}, x_c.options().dtype(torch::kUInt8));
+        mask1_ptr = mask1.data_ptr<uint8_t>();
+        mask2_ptr = mask2.data_ptr<uint8_t>();
+    }
+
+    // launch configs
+    dim3 block1(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 grid1(
+        (hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
+        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+    );
+    dim3 block2(BLOCK_SIZE * BLOCK_SIZE);
+    dim3 grid2(
+        (embedding_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
+        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+    );
+
+    // Philox offsets
+    // first kernel uses [0 .. ceil(num_vectors*hidden_dim/4)-1], second one starts from offset2
+    const uint64_t n1 = static_cast<uint64_t>(num_vectors) * static_cast<uint64_t>(hidden_dim);
+    const uint32_t offset1 = 0;
+    const uint32_t offset2 = static_cast<uint32_t>((n1 + 4 - 1) / 4);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+    ffn_swiglu_dropout_fp32_kernel_v1<<<grid1, block1, 0, stream>>>(
+        x2d.data_ptr<float>(),
+        z.data_ptr<float>(),
+        W_gate_c.data_ptr<float>(), b_gate_c.data_ptr<float>(),
+        W_in_c.data_ptr<float>(),   b_in_c.data_ptr<float>(),
+        mask1_ptr, p, seed, offset1,
+        num_vectors, embedding_dim, hidden_dim
+    );
+
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+
+    ffn_residual_dropout_fp32_kernel_v1<<<grid2, block2, 0, stream>>>(
+        x2d.data_ptr<float>(),
+        z.data_ptr<float>(),
+        y.data_ptr<float>(),
+
+        W_out_c.data_ptr<float>(),   b_out_c.data_ptr<float>(),
+        mask2_ptr, p, seed, offset2,
+        num_vectors, embedding_dim, hidden_dim
+    );
+
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: kernel launch failed");
+
+    return y.view({batch_size, seq_len, embedding_dim});
+}
 
 
 // backward wrapper
