@@ -131,7 +131,8 @@ __global__ void ffn_residual_dropout_fp32_kernel_v1(
             sum = fmaf(z[z_offset + k], W_out[k * embedding_dim + col], sum);
         }
 
-        float value = sum + residual[y_index];
+        float value = sum + b_out[col];
+        float res = residual[y_index];
         if (mask && p > 0.0f){
             curandStatePhilox4_32_10_t st;
             curand_init(
@@ -146,11 +147,12 @@ __global__ void ffn_residual_dropout_fp32_kernel_v1(
 
             float inv_dropout = 1.0f / (1.0f - p);
             if (m){
-                y[y_index] = value * inv_dropout;
+                value = value * inv_dropout;
             } else {
-                y[y_index] = 0.0f;
+                value = 0.0f;
             }
         }
+        y[y_index] = value + res;
     }
 }
 
