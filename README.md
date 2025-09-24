@@ -19,16 +19,18 @@ setup.py            # Setup file
   - Realized via warp-on-row calculation
   - TODO: realize for fp16/bf16 with vectorized memory access and block-on-row calculation  
 - Embeddings layer: work in progress
-- FFN with SwiGLU: work in progress
+- FFN with SwiGLU: step-by-step optimizations for 2 kernels (gemm-swiglu-dropout and gemm-residual-dropout)
+  - Realized naive matmul version
+  - Realized coalesced memory access version
+  - SMEM tiling (work in progress)
+  - Registers 2D tiling (work in progress)
+  - fp16/bf16 support with vector access to GMEM/SMEM/registers (work in progreess)
+  - tensor cores support (work in progreess)
+  - double buffer and async tiles loading (work in progreess)
+
 - MLA with RoPE: work in progress
 
 
 ## Installation
 
 This project requires a working CUDA toolkit and a PyTorch installation with matching CUDA version (I was working with CUDA 12.9 version).
-
-To build the package run:
-
-```bash
-python setup.py build_ext --inplace
-```
