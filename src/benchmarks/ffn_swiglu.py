@@ -142,6 +142,7 @@ if __name__ == "__main__":
     tie_weights_torch_to_custom(ref, v2)
 
     ms_ref_fwd, y_ref = torch_ffn_forward_benchmarks(x, ref)
+    ms_ref_fwd_cpu, y_ref_cpu = torch_ffn_forward_benchmarks(x.clone().cpu(), ref.to("cpu"))
     ms_v1_fwd,  y_v1  = custom_ffn_forward_benchmarks(x, v1)
     ms_v2_fwd,  y_v2  = custom_ffn_forward_benchmarks(x, v2)
 
@@ -149,9 +150,10 @@ if __name__ == "__main__":
     maxdiff_v2 = (y_ref - y_v2).abs().max().item()
 
     print(f"[FFN+SwiGLU] forward:")
-    print(f"  torch: {ms_ref_fwd:.3f} ms")
-    print(f"  v1   : {ms_v1_fwd:.3f} ms | max|diff|={maxdiff_v1:.3e}")
-    print(f"  v2   : {ms_v2_fwd:.3f} ms | max|diff|={maxdiff_v2:.3e}")
+    print(f"  torch (cpu) : {ms_ref_fwd_cpu:.3f} ms")
+    print(f"  torch (cuda): {ms_ref_fwd:.3f} ms")
+    print(f"  v1          : {ms_v1_fwd:.3f} ms | max|diff|={maxdiff_v1:.3e}")
+    print(f"  v2          : {ms_v2_fwd:.3f} ms | max|diff|={maxdiff_v2:.3e}")
 
     ms_ref_bwd = torch_ffn_backward_benchmarks(dy, ref, x)
     print(f"[FFN+SwiGLU] backward (torch only, p=0): {ms_ref_bwd:.3f} ms")
