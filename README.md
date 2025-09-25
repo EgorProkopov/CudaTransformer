@@ -8,7 +8,6 @@ src/
   benchmarks/       # benchmarking scripts
   cuda_kernels/     # CUDA kernels implementations, torch wrappers and python bindings
   modules/          # python wrappers and modules
-setup.py            # Setup file
 ```
 
 ## Realization
