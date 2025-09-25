@@ -365,6 +365,60 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
 
 
 // ===========================================================================
+// =============================== v4 ========================================
+// ===========================================================================
+
+// 1st fwd-kernel v4: GEMM + SwiGLU + Dropout with registers tiling
+__global__ void ffn_swiglu_dropout_fp32_kernel_v3(
+    const float* __restrict__ x,           // input data to ffn block
+    float* __restrict__ z,                 // output data
+
+    const float* __restrict__ W_gate,      // weights for gating layer
+    const float* __restrict__ b_gate,      // bias for gating layer
+
+    const float* __restrict__ W_in,        // weights for input layer
+    const float* __restrict__ b_in,        // bias for input layer
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len      
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
+
+}
+
+
+// 2st fwd-kernel v4: GEMM + Residual + Dropout with registers tiling
+__global__ void ffn_residual_dropout_fp32_kernel_v3(
+    const float* __restrict__ residual,    // input data to ffn block
+    const float* __restrict__ z,           // input data from prev kernel
+    float* y,                              // output data
+
+    const float* __restrict__ W_out,       // second ffn layer weights
+    const float* __restrict__ b_out,       // second ffn layer bias
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
+
+}
+
+
+// ===========================================================================
 // =========================== backward-pass =================================
 // ===========================================================================
 // backward-pass kernel
