@@ -36,8 +36,7 @@ class FFNSwiGLUv1Function(torch.autograd.Function):
         W_gate: torch.Tensor, b_gate: torch.Tensor,
         W_in: torch.Tensor, b_in: torch.Tensor,
         W_out: torch.Tensor, b_out: torch.Tensor,
-        p: float,
-        seed: int
+        p: float, seed: int
     ) -> torch.Tensor:
         y = _ffn_swiglu_extension.forward_v1(
             x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
@@ -61,7 +60,8 @@ class FFNSwiGLUv2Function(torch.autograd.Function):
         ctx, x: torch.Tensor,
         W_gate: torch.Tensor, b_gate: torch.Tensor,
         W_in: torch.Tensor, b_in: torch.Tensor,
-        W_out: torch.Tensor, b_out: torch.Tensor
+        W_out: torch.Tensor, b_out: torch.Tensor,
+        p: float, seed: int
     ):
         y = _ffn_swiglu_extension.forward_v2(
             x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
