@@ -9,8 +9,12 @@
 #include <cuda_bf16.h>
 
 
-#ifndef BLOCK_SIZE
-#define BLOCK_SIZE 32
+#ifndef BLOCK_SIZE_N
+#define BLOCK_SIZE_N 32
+#endif
+
+#ifndef BLOCK_SIZE_M
+#define BLOCK_SIZE_M 8
 #endif
 
 
@@ -190,8 +194,8 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v2(
     const uint32_t hidden_dim
 ){
     // row and col are calculated for result matrix with shape (num_vectors, hidden_dim)
-    const uint32_t row = blockIdx.y * BLOCK_SIZE + (threadIdx.x / BLOCK_SIZE);
-    const uint32_t col = blockIdx.x * BLOCK_SIZE + (threadIdx.x % BLOCK_SIZE);
+    const uint32_t row = blockIdx.y * BLOCK_SIZE_M + threadIdx.y;
+    const uint32_t col = blockIdx.x * BLOCK_SIZE_N + threadIdx.x;
 
     const uint64_t x_offset = (uint64_t)row * (uint64_t)embedding_dim;
     const uint64_t z_index = (uint64_t)row * (uint64_t)hidden_dim + col;
@@ -265,8 +269,8 @@ __global__ void ffn_residual_dropout_fp32_kernel_v2(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
-    const uint32_t row = blockIdx.y * BLOCK_SIZE + (threadIdx.x / BLOCK_SIZE);
-    const uint32_t col = blockIdx.x * BLOCK_SIZE + (threadIdx.x % BLOCK_SIZE);
+    const uint32_t row = blockIdx.y * BLOCK_SIZE_M + threadIdx.y;
+    const uint32_t col = blockIdx.x * BLOCK_SIZE_N + threadIdx.x;
 
     const uint64_t z_offset = (uint64_t)row * (uint64_t)hidden_dim;
     const uint64_t y_index = (uint64_t)row * (uint64_t)embedding_dim + col;
@@ -583,15 +587,15 @@ torch::Tensor ffn_forward_fp32_kernel_v1(
     }
 
     // launch configs
-    dim3 block1(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 block1(BLOCK_SIZE_N, BLOCK_SIZE_N);
     dim3 grid1(
-        (hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+        (hidden_dim + BLOCK_SIZE_N - 1) / BLOCK_SIZE_N,
+        (num_vectors + BLOCK_SIZE_N - 1) / BLOCK_SIZE_N
     );
-    dim3 block2(BLOCK_SIZE, BLOCK_SIZE);
+    dim3 block2(BLOCK_SIZE_N, BLOCK_SIZE_N);
     dim3 grid2(
-        (embedding_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+        (embedding_dim + BLOCK_SIZE_N - 1) / BLOCK_SIZE_N,
+        (num_vectors + BLOCK_SIZE_N - 1) / BLOCK_SIZE_N
     );
 
     // Philox offsets
@@ -690,15 +694,15 @@ torch::Tensor ffn_forward_fp32_kernel_v2(
     }
 
     // launch configs
-    dim3 block1(BLOCK_SIZE * BLOCK_SIZE);
+    dim3 block1(BLOCK_SIZE_N, BLOCK_SIZE_M);
     dim3 grid1(
-        (hidden_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+        (hidden_dim + BLOCK_SIZE_N - 1) / BLOCK_SIZE_N,
+        (num_vectors + BLOCK_SIZE_M - 1) / BLOCK_SIZE_M
     );
-    dim3 block2(BLOCK_SIZE * BLOCK_SIZE);
+    dim3 block2(BLOCK_SIZE_N, BLOCK_SIZE_M);
     dim3 grid2(
-        (embedding_dim + BLOCK_SIZE - 1) / BLOCK_SIZE,
-        (num_vectors + BLOCK_SIZE - 1) / BLOCK_SIZE
+        (embedding_dim + BLOCK_SIZE_N - 1) / BLOCK_SIZE_N,
+        (num_vectors + BLOCK_SIZE_M - 1) / BLOCK_SIZE_M
     );
 
     // Philox offsets
