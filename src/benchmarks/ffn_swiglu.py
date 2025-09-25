@@ -123,7 +123,6 @@ def torch_ffn_backward_benchmarks(
     return ms
 
 
-
 if __name__ == "__main__":
     torch.manual_seed(239)
     device = "cuda"
@@ -142,7 +141,7 @@ if __name__ == "__main__":
     tie_weights_torch_to_custom(ref, v2)
 
     ms_ref_fwd, y_ref = torch_ffn_forward_benchmarks(x, ref)
-    ms_ref_fwd_cpu, y_ref_cpu = torch_ffn_forward_benchmarks(x.clone().cpu(), ref.to("cpu"))
+    ms_ref_fwd_cpu, y_ref_cpu = torch_ffn_forward_benchmarks(x.clone().to("cpu"), ref.to("cpu"))
     ms_v1_fwd,  y_v1  = custom_ffn_forward_benchmarks(x, v1)
     ms_v2_fwd,  y_v2  = custom_ffn_forward_benchmarks(x, v2)
 
@@ -155,5 +154,5 @@ if __name__ == "__main__":
     print(f"  v1          : {ms_v1_fwd:.3f} ms | max|diff|={maxdiff_v1:.3e}")
     print(f"  v2          : {ms_v2_fwd:.3f} ms | max|diff|={maxdiff_v2:.3e}")
 
-    ms_ref_bwd = torch_ffn_backward_benchmarks(dy, ref, x)
+    ms_ref_bwd = torch_ffn_backward_benchmarks(dy, ref.to("cuda"), x)
     print(f"[FFN+SwiGLU] backward (torch only, p=0): {ms_ref_bwd:.3f} ms")
