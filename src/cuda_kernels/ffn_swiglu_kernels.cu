@@ -17,10 +17,43 @@
 #define BLOCK_SIZE_M 8
 #endif
 
+#ifndef TILE_SIZE 
+#define TILE_SIZE 16
+#endif
+
 
 // device functions
 
+__device__ __forceinline__ float apply_dropout_mask(
+    float value,
+    uint8_t* __restrict__ mask,
+    uint64_t idx,
+    float p,
+    float inv_dropout,
+    const uint32_t seed,
+    const uint32_t offset
+){
+    if (!mask || p <= 0.f) return value;
 
+    curandStatePhilox4_32_10_t st;
+    curand_init(
+        (uint64_t)seed,
+        idx, 
+        (uint64_t)offset,
+        &st
+    );
+
+    float r = curand_uniform(&st);
+    uint8_t m = (r > p);
+    mask[idx] = m;
+
+    if (m){
+        value = value * inv_dropout;
+    } else {
+        value = 0.0f;
+    }
+    return value;
+}
 
 
 // ===========================================================================
@@ -80,27 +113,12 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v1(
         float sigmoid = __fdividef(1, 1 + __expf(-sum_gate));
         float value = (sum_gate * sigmoid) * sum_in;
 
-        if (mask && p > 0.0f){
-            curandStatePhilox4_32_10_t st;  // unique state for random number generator
-            curand_init(
-                (uint64_t)seed,
-                z_index,
-                (uint64_t)offset,
-                &st
-            );                              // rng initalization
-            float r = curand_uniform(&st);
-            uint8_t m = (r > p);
-            mask[z_index] = m;
-
-            float inv_dropout = 1.0f / (1.0f - p);  // to avoid math expectation change
-            if (m){
-                z[z_index] = value * inv_dropout;
-            } else {
-                z[z_index] = 0.0f;
-            }
-        } else {
-            z[z_index] = value;
-        }
+        float inv_dropout = 1.0f / (1.0f - p);
+        value = apply_dropout_mask(
+            value, mask, z_index,
+            p, inv_dropout,
+            seed, offset
+        );
     }
 }
 
@@ -131,7 +149,7 @@ __global__ void ffn_residual_dropout_fp32_kernel_v1(
     const uint64_t z_offset = (uint64_t)row * (uint64_t)hidden_dim;
     const uint64_t y_index = (uint64_t)row * (uint64_t)embedding_dim + col;
 
-    if (row < num_vectors && col < embedding_dim){
+    if (row < num_vectors && col < hidden_dim){
         float sum = 0.0f;
 
         #pragma unroll 1
@@ -141,25 +159,13 @@ __global__ void ffn_residual_dropout_fp32_kernel_v1(
 
         float value = sum + b_out[col];
         float res = residual[y_index];
-        if (mask && p > 0.0f){
-            curandStatePhilox4_32_10_t st;
-            curand_init(
-                (uint64_t)seed,
-                y_index,
-                (uint64_t)offset,
-                &st
-            );
-            float r = curand_uniform(&st);
-            uint8_t m = (r > p);
-            mask[y_index] = m;
 
-            float inv_dropout = 1.0f / (1.0f - p);
-            if (m){
-                value = value * inv_dropout;
-            } else {
-                value = 0.0f;
-            }
-        }
+        float inv_dropout = 1.0f / (1.0f - p);
+        value = apply_dropout_mask(
+            value, mask, y_index,
+            p, inv_dropout,
+            seed, offset
+        );
         y[y_index] = value + res;
     }
 }
@@ -225,27 +231,12 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v2(
     float sigmoid = __fdividef(1, 1 + __expf(-sum_gate));
     float value = (sum_gate * sigmoid) * sum_in;
 
-    if (mask && p > 0.0f){
-        curandStatePhilox4_32_10_t st;  // unique state for random number generator
-        curand_init(
-            (uint64_t)seed,
-            z_index,
-            (uint64_t)offset,
-            &st
-        );                              // rng initalization
-        float r = curand_uniform(&st);
-        uint8_t m = (r > p);
-        mask[z_index] = m;
-
-        float inv_dropout = 1.0f / (1.0f - p);  // to avoid math expectation change
-        if (m){
-            z[z_index] = value * inv_dropout;
-        } else {
-            z[z_index] = 0.0f;
-        }
-    } else {
-        z[z_index] = value;
-    }
+    float inv_dropout = 1.0f / (1.0f - p);
+    value = apply_dropout_mask(
+        value, mask, z_index,
+        p, inv_dropout,
+        seed, offset
+    );
 }
 
 
@@ -286,26 +277,13 @@ __global__ void ffn_residual_dropout_fp32_kernel_v2(
     float value = sum + b_out[col];
     float res = residual[y_index];
 
-    if (mask && p > 0.0f){
-        curandStatePhilox4_32_10_t st;
-        curand_init(
-            (uint64_t)seed,
-            y_index, 
-            (uint64_t)offset,
-            &st
-        );
+    float inv_dropout = 1.0f / (1.0f - p);
+    value = apply_dropout_mask(
+        value, mask, y_index,
+        p, inv_dropout,
+        seed, offset
+    );
 
-        float r = curand_uniform(&st);
-        uint8_t m = (r > p);
-        mask[y_index] = m;
-
-        float inv_dropout = 1.0f / (1.0f - p);
-        if (m){
-            value = value * inv_dropout;
-        } else {
-            value = 0.0f;
-        }
-    }
     y[y_index] = value + res;
 }
 
@@ -336,7 +314,70 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v3(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
+    __shared__ float x_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float W_gate_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float W_in_shared[TILE_SIZE][TILE_SIZE];
 
+    const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    const uint64_t x_offset = (uint64_t)row * (uint64_t)embedding_dim;
+    const uint64_t z_index = (uint64_t)row * (uint64_t)hidden_dim + col;
+
+    const bool in_row = (row < num_vectors);
+    const bool in_col = (col < hidden_dim);
+    const bool in_ranges = in_row && in_col;
+
+    float sum_gate = 0.0f;
+    float sum_in = 0.0f;
+
+    const uint32_t tiles = (embedding_dim + TILE_SIZE - 1) / TILE_SIZE;
+
+    // iterations for each tile
+    for (uint32_t tile = 0; tile < tiles; tile++){
+        const uint32_t col_x_t = tile * TILE_SIZE + threadIdx.x;
+        const uint32_t row_t = tile * TILE_SIZE + threadIdx.y;
+
+        // Коалесцированная загрузка в разделяемую память
+        // Проверка на паддинг, так как может быть vec_size % TILE_SIZE != 0 и embedding_dim % TILE_SIZE != 0
+        if (in_row && col_x_t < embedding_dim) {
+            x_shared[threadIdx.y][threadIdx.x] = x[x_offset + col_x_t];
+        } else {
+            x_shared[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        if (in_col && row_t < embedding_dim) {
+            W_gate_shared[threadIdx.y][threadIdx.x] = W_gate[(uint64_t)row_t * (uint64_t)hidden_dim + col];
+            W_in_shared[threadIdx.y][threadIdx.x] = W_in[(uint64_t)row_t * (uint64_t)hidden_dim + col];
+        } else {
+            W_gate_shared[threadIdx.y][threadIdx.x] = 0.0f;
+            W_in_shared[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (uint32_t l = 0; l < TILE_SIZE; l++){
+            float x_value = x_shared[threadIdx.y][l];
+            sum_gate = fmaf(x_value, W_gate_shared[l][threadIdx.x], sum_gate);
+            sum_in = fmaf(x_value, W_in_shared[l][threadIdx.x], sum_in);
+        }
+        __syncthreads();
+    }
+
+    sum_gate += b_gate[col];
+    sum_in += b_in[col];
+
+    float sigmoid = __fdividef(1, 1 + __expf(-sum_gate));
+    float value = (sum_gate * sigmoid) * sum_in;
+
+    float inv_dropout = 1.0f / (1.0f - p);
+    value = apply_dropout_mask(
+        value, mask, z_index,
+        p, inv_dropout,
+        seed, offset
+    );
+    z[z_index] = value;
 }
 
 
@@ -360,7 +401,16 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
+    __shared__ float z_shared[TILE_SIZE][TILE_SIZE];
+    __shared__ float W_out_shared[TILE_SIZE][TILE_SIZE];
 
+    const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    const uint64_t x_offset = (uint64_t)row * (uint64_t)embedding_dim;
+    const uint64_t z_index = (uint64_t)row * (uint64_t)hidden_dim + col;
+
+    if (col >= hidden_dim) return;
 }
 
 
