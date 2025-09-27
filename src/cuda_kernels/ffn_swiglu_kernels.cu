@@ -364,20 +364,21 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v3(
         }
         __syncthreads();
     }
+    if (in_ranges){
+        sum_gate += b_gate[col];
+        sum_in += b_in[col];
 
-    sum_gate += b_gate[col];
-    sum_in += b_in[col];
+        float sigmoid = __fdividef(1, 1 + __expf(-sum_gate));
+        float value = (sum_gate * sigmoid) * sum_in;
 
-    float sigmoid = __fdividef(1, 1 + __expf(-sum_gate));
-    float value = (sum_gate * sigmoid) * sum_in;
-
-    float inv_dropout = 1.0f / (1.0f - p);
-    value = apply_dropout_mask(
-        value, mask, z_index,
-        p, inv_dropout,
-        seed, offset
-    );
-    z[z_index] = value;
+        float inv_dropout = 1.0f / (1.0f - p);
+        value = apply_dropout_mask(
+            value, mask, z_index,
+            p, inv_dropout,
+            seed, offset
+        );
+        z[z_index] = value;
+    }
 }
 
 
@@ -407,10 +408,54 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
     const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y;
     const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x;
 
-    const uint64_t x_offset = (uint64_t)row * (uint64_t)embedding_dim;
-    const uint64_t z_index = (uint64_t)row * (uint64_t)hidden_dim + col;
+    const uint64_t z_offset = (uint64_t)row * (uint64_t)hidden_dim;
+    const uint64_t y_index = (uint64_t)row * (uint64_t)embedding_dim + col;
 
-    if (col >= hidden_dim) return;
+    const bool in_row = (row < num_vectors);
+    const bool in_col = (col < embedding_dim);
+    const bool in_ranges = in_row && in_col;
+
+    const uint32_t tiles = (hidden_dim + TILE_SIZE - 1) / TILE_SIZE;
+
+    float sum = 0.0f;
+
+    // iterations for each tile
+    for (uint32_t tile = 0; tile < tiles; tile++){
+        const uint32_t col_z_t = tile * TILE_SIZE + threadIdx.x;
+        const uint32_t row_t = tile * TILE_SIZE + threadIdx.y;
+        
+        if (in_row && col_z_t < hidden_dim){
+            z_shared[threadIdx.y][threadIdx.x] = z[z_offset + col_z_t];
+        } else{
+            z_shared[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        if (in_col && row_t < hidden_dim){
+            W_out_shared[threadIdx.y][threadIdx.x] = W_out[(uint64_t)row_t * (uint64_t)embedding_dim + col];
+        } else {
+            W_out_shared[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (uint32_t l = 0; l < TILE_SIZE; l++){
+            sum = fmaf(z_shared[threadIdx.y][l], W_out_shared[l][threadIdx.x], sum);
+        }
+        __syncthreads();
+    }
+    if (in_ranges){
+        float value = sum + b_out[col];
+        float res = residual[y_index];
+
+        float inv_dropout = 1.0f / (1.0f - p);
+        value = apply_dropout_mask(
+            value, mask, y_index,
+            p, inv_dropout,
+            seed, offset
+        );
+        
+        y[y_index] = value + res;
+    }
 }
 
 
