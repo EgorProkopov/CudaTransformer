@@ -464,7 +464,7 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
 // ===========================================================================
 
 // 1st fwd-kernel v4: GEMM + SwiGLU + Dropout with registers tiling
-__global__ void ffn_swiglu_dropout_fp32_kernel_v3(
+__global__ void ffn_swiglu_dropout_fp32_kernel_v4(
     const float* __restrict__ x,           // input data to ffn block
     float* __restrict__ z,                 // output data
 
@@ -490,7 +490,7 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v3(
 
 
 // 2st fwd-kernel v4: GEMM + Residual + Dropout with registers tiling
-__global__ void ffn_residual_dropout_fp32_kernel_v3(
+__global__ void ffn_residual_dropout_fp32_kernel_v4(
     const float* __restrict__ residual,    // input data to ffn block
     const float* __restrict__ z,           // input data from prev kernel
     float* y,                              // output data
@@ -511,6 +511,60 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
 ){
 
 }
+
+// ===========================================================================
+// =============================== v5 ========================================
+// ===========================================================================
+
+// 1st fwd-kernel v5: GEMM + SwiGLU + Dropout with fp16/bf16 support
+__global__ void ffn_swiglu_dropout_fp32_kernel_v5(
+    const float* __restrict__ x,           // input data to ffn block     need to switch to fp16/bf16
+    float* __restrict__ z,                 // output data                 need to switch to fp16/bf16
+
+    const float* __restrict__ W_gate,      // weights for gating layer    need to switch to fp16/bf16
+    const float* __restrict__ b_gate,      // bias for gating layer       need to switch to fp16/bf16
+
+    const float* __restrict__ W_in,        // weights for input layer     need to switch to fp16/bf16
+    const float* __restrict__ b_in,        // bias for input layer        need to switch to fp16/bf16
+
+    uint8_t* __restrict__ mask,            // dropout mask                need to switch to fp16/bf16
+    const float p,                         // dropout rate                need to switch to fp16/bf16
+    const uint32_t seed,                   // dropout seed                need to switch to fp16/bf16
+    const uint32_t offset,                 // rnd offset                  need to switch to fp16/bf16
+
+    const uint32_t num_vectors,            // batch_size * seq_len        need to switch to fp16/bf16
+
+    // vector shapes
+    const uint32_t embedding_dim,                                      // need to switch to fp16/bf16
+    const uint32_t hidden_dim                                          // need to switch to fp16/bf16
+){
+
+}
+
+
+// 2st fwd-kernel v5: GEMM + Residual + Dropout with fp16/bf16 support
+__global__ void ffn_residual_dropout_fp32_kernel_v5(
+    const float* __restrict__ residual,    // input data to ffn block       need to switch to fp16/bf16
+    const float* __restrict__ z,           // input data from prev kernel   need to switch to fp16/bf16
+    float* y,                              // output data
+
+    const float* __restrict__ W_out,       // second ffn layer weights      need to switch to fp16/bf16
+    const float* __restrict__ b_out,       // second ffn layer bias         need to switch to fp16/bf16
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate                  need to switch to fp16/bf16
+    const uint32_t seed,                   // dropout seed                  need to switch to fp16/bf16
+    const uint32_t offset,                 // rnd offset                    need to switch to fp16/bf16
+
+    const uint32_t num_vectors,            // batch_size * seq_len          need to switch to fp16/bf16
+
+    // vector shapes
+    const uint32_t embedding_dim,                                        // need to switch to fp16/bf16
+    const uint32_t hidden_dim                                            // need to switch to fp16/bf16
+){
+
+}
+
 
 
 // ===========================================================================
