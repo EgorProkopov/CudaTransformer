@@ -21,7 +21,7 @@ src/
 - FFN with SwiGLU: step-by-step optimizations for 2 kernels (gemm-swiglu-dropout and gemm-residual-dropout)
   - Realized naive matmul version
   - Realized coalesced memory access version
-  - SMEM tiling (work in progress)
+  - SMEM tiling
   - Registers 2D tiling (work in progress)
   - fp16/bf16 support with vector access to GMEM/SMEM/registers (work in progreess)
   - tensor cores support (work in progreess)

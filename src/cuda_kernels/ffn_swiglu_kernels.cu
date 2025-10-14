@@ -21,6 +21,10 @@
 #define TILE_SIZE 32
 #endif
 
+#ifndef CHUNCK_SIZE
+#define CHUNCK_SIZE 4
+#endif
+
 // device functions
 
 
