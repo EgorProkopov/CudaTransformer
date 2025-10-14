@@ -189,3 +189,55 @@ class FFNSwiGLUv3(nn.Module):
             float(p), int(self.seed)
         )
 
+
+class FFNSwiGLUv4Function(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx, x: torch.Tensor,
+        W_gate: torch.Tensor, b_gate: torch.Tensor,
+        W_in: torch.Tensor, b_in: torch.Tensor,
+        W_out: torch.Tensor, b_out: torch.Tensor,
+        p: float, seed: int
+    ):
+        y = _ffn_swiglu_extension.forward_v4(
+            x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
+        )
+        ctx.save_for_backward()
+        ctx.p = p
+        ctx.seed = seed
+        return y
+
+    @staticmethod
+    def backward(
+        ctx, *grad_outputs
+    ) -> tuple[torch.Tensor, Optional[None], Optional[None], Optional[None], Optional[None], Optional[None], Optional[None]]:
+        pass
+
+
+class FFNSwiGLUv4(nn.Module):
+    def __init__(self, embedding_dim: int, hidden_dim: int, p: float = 0.0, seed: int = 239):
+        super().__init__()
+        self.embedding_dim = int(embedding_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.p = float(p)
+        self.seed = int(seed)
+
+        self.W_gate = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim))
+        self.b_gate = nn.Parameter(torch.zeros(self.hidden_dim))
+        self.W_in = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim))
+        self.b_in = nn.Parameter(torch.zeros(self.hidden_dim))
+        self.W_out = nn.Parameter(torch.empty(self.hidden_dim, self.embedding_dim))
+        self.b_out = nn.Parameter(torch.zeros(self.embedding_dim))
+
+        nn.init.xavier_uniform_(self.W_gate)
+        nn.init.xavier_uniform_(self.W_in)
+        nn.init.xavier_uniform_(self.W_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training and self.p > 0.0: p = self.p
+        else: p = 0.0
+        return FFNSwiGLUv4Function.apply(
+            x, self.W_gate, self.b_gate, self.W_in, self.b_in, self.W_out, self.b_out,
+            float(p), int(self.seed)
+        )
+
