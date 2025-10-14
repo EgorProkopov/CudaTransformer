@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from src.modules.ffn_swiglu import FFNSwiGLUv1, FFNSwiGLUv2, FFNSwiGLUv3, FFNSwiGLUv4
 
 WARM_UP_RUNS = 20
-ITERATIONS = 200
+ITERATIONS = 50
 
 
 def benchmark_gpu(function):

@@ -19,7 +19,7 @@ def load_cuda_extension():
     if not cu_path.exists(): raise FileNotFoundError(f"CUDA file not found: {cu_path}")
 
     extra_nvcc_flags = ["-O3", "-std=c++17"]
-    extra_cuda_flags = ["-O3", "--use_fast_math"]
+    extra_cuda_flags = ["-O3", "--use_fast_math", "-Xptxas=-v", "-lineinfo"]
 
     return load(
         name="ffn_swiglu_cuda",

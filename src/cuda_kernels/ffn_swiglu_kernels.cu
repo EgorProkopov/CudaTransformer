@@ -22,7 +22,7 @@
 #endif
 
 #ifndef CHUNCK_SIZE
-#define CHUNCK_SIZE 4
+#define CHUNCK_SIZE 2
 #endif
 
 #ifndef TILE_SIZE
@@ -535,9 +535,9 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
-    __shared__ float x_s[TILE_SIZE][TILE_SIZE + 1];      // +1 to avoid bank conflicts
-    __shared__ float W_gate_s[TILE_SIZE][TILE_SIZE + 1];
-    __shared__ float W_in_s[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ float x_s[TILE_SIZE][TILE_SIZE];      // +1 to avoid bank conflicts
+    __shared__ float W_gate_s[TILE_SIZE][TILE_SIZE];
+    __shared__ float W_in_s[TILE_SIZE][TILE_SIZE];
 
     const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y * CHUNCK_SIZE;
     const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
@@ -554,9 +554,6 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
             uint32_t r = row + i;
             uint32_t c = tile * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
             
-            uint32_t w_r = tile * TILE_SIZE + threadIdx.y * CHUNCK_SIZE + i;
-            uint32_t w_c = col;
-
             #pragma unroll
             for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
                 if (r < num_vectors && (c + j) < embedding_dim){
@@ -565,11 +562,12 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
                     x_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = 0.0f;
                 }
 
-                uint64_t w_index = (uint64_t)(w_c) + j;
+                uint32_t w_r = tile * TILE_SIZE + threadIdx.y * CHUNCK_SIZE + i;
+                uint32_t w_c = col + j;
                 float w_gate_value = 0.0f;
                 float w_in_value = 0.0f;
-                if (w_r < embedding_dim && w_index < hidden_dim){
-                    uint64_t w_idx = (uint64_t)w_r * (uint64_t)hidden_dim + (uint64_t)w_index;
+                if (w_r < embedding_dim && w_c < hidden_dim){
+                    uint64_t w_idx = (uint64_t)w_r * (uint64_t)hidden_dim + (uint64_t)w_c;
                     w_gate_value = W_gate[w_idx];
                     w_in_value = W_in[w_idx];
                 }
@@ -578,30 +576,29 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
             }
         }
         __syncthreads();
+
         // SMEM -> RMEM and partial sums computation
         #pragma unroll
-        for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
+        for (uint32_t k = 0; k < TILE_SIZE; k++){
             float x_reg[CHUNCK_SIZE];
-            float W_gete_reg[CHUNCK_SIZE];
+            float W_gate_reg[CHUNCK_SIZE];
             float W_in_reg[CHUNCK_SIZE];
 
             // SMEM -> RMEM
             #pragma unroll
-            for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
-                uint32_t col_in_tile = threadIdx.x * CHUNCK_SIZE + j;
-                
-                x_reg[j] = x_s[threadIdx.y * CHUNCK_SIZE + i][i];
-                W_gete_reg[j] = W_gate_s[i][col_in_tile];
-                W_in_reg[j] = W_in_s[i][col_in_tile];
+            for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
+                x_reg[i] = x_s[threadIdx.y * CHUNCK_SIZE + i][k];
+                W_gate_reg[i] = W_gate_s[k][threadIdx.x * CHUNCK_SIZE + i];
+                W_in_reg[i] = W_in_s[k][threadIdx.x * CHUNCK_SIZE + i];
             }
 
-            // partial sums computation
+            // Partial sums computation
             #pragma unroll
-            for (uint32_t k = 0; k < CHUNCK_SIZE; k++){
+            for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
                 #pragma unroll
-                for (uint32_t l = 0; l < CHUNCK_SIZE; l++){
-                    sum_gate[i * CHUNCK_SIZE + l] = fmaf(x_reg[k], W_gete_reg[l], sum_gate[i * CHUNCK_SIZE + l]);
-                    sum_in[i * CHUNCK_SIZE + l] = fmaf(x_reg[k], W_in_reg[l], sum_in[i * CHUNCK_SIZE + l]);
+                for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
+                    sum_gate[i * CHUNCK_SIZE + j] = fmaf(x_reg[i], W_gate_reg[j], sum_gate[i * CHUNCK_SIZE + j]);
+                    sum_in[i * CHUNCK_SIZE + j] = fmaf(x_reg[i], W_in_reg[j], sum_in[i * CHUNCK_SIZE + j]);
                 }
             }
         }
@@ -670,8 +667,8 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
-    __shared__ float z_s[TILE_SIZE][TILE_SIZE + 1];
-    __shared__ float W_out_s[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ float z_s[TILE_SIZE][TILE_SIZE];
+    __shared__ float W_out_s[TILE_SIZE][TILE_SIZE];
 
     const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y * CHUNCK_SIZE;
     const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
@@ -686,24 +683,21 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
             uint32_t r = row + i;
             uint32_t c = tile * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
             
-            uint32_t w_r = tile * TILE_SIZE + threadIdx.y * CHUNCK_SIZE + i;
-            uint32_t w_c = col;
-
             #pragma unroll
             for (uint32_t j = 0; j < CHUNCK_SIZE; j++) {
-                float z_value = 0.0f;
-                float w_value = 0.0f;
-
                 if (r < num_vectors && (c + j) < hidden_dim) {
-                    z_value = z[r * hidden_dim + c + j];
+                    z_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = z[(uint64_t)r * (uint64_t)hidden_dim + (uint64_t)(c + j)];
+                } else {
+                    z_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = 0.0f;
                 }
-                
-                if (w_r < hidden_dim && w_c + j < embedding_dim) {
-                    uint64_t w_index = (uint64_t)w_r * (uint64_t)embedding_dim + (uint64_t)(w_c + j);
+
+                uint32_t w_r = tile * TILE_SIZE + threadIdx.y * CHUNCK_SIZE + i;
+                uint32_t w_c = col + j;
+                float w_value = 0.0f;
+                if (w_r < hidden_dim && w_c < embedding_dim) {
+                    uint64_t w_index = (uint64_t)w_r * (uint64_t)embedding_dim + (uint64_t)w_c;
                     w_value = W_out[w_index];
                 }
-
-                z_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = z_value;
                 W_out_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = w_value;
             }
         }
@@ -711,25 +705,23 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
 
         // SMEM -> RMEM and partial sums computation
         #pragma unroll
-        for (uint32_t i = 0; i < CHUNCK_SIZE; i++) {
+        for (uint32_t k = 0; k < TILE_SIZE; k++) {
             float z_reg[CHUNCK_SIZE];
             float W_out_reg[CHUNCK_SIZE];
 
             // SMEM -> RMEM
             #pragma unroll
-            for (uint32_t j = 0; j < CHUNCK_SIZE; j++) {
-                uint32_t col_in_tile = threadIdx.x * CHUNCK_SIZE + j;
-                
-                z_reg[j] = z_s[threadIdx.y * CHUNCK_SIZE + i][i];
-                W_out_reg[j] = W_out_s[i][col_in_tile];
+            for (uint32_t i = 0; i < CHUNCK_SIZE; i++) {
+                z_reg[i] = z_s[threadIdx.y * CHUNCK_SIZE + i][k];
+                W_out_reg[i] = W_out_s[k][threadIdx.x * CHUNCK_SIZE + i];
             }
 
             // partial sums computation
             #pragma unroll
-            for (uint32_t k = 0; k < CHUNCK_SIZE; k++) {
+            for (uint32_t i = 0; i < CHUNCK_SIZE; i++) {
                 #pragma unroll
-                for (uint32_t l = 0; l < CHUNCK_SIZE; l++) {
-                    sum[k * CHUNCK_SIZE + l] = fmaf(z_reg[k], W_out_reg[l], sum[k * CHUNCK_SIZE + l]);
+                for (uint32_t j = 0; j < CHUNCK_SIZE; j++) {
+                    sum[i * CHUNCK_SIZE + j] = fmaf(z_reg[i], W_out_reg[j], sum[i * CHUNCK_SIZE + j]);
                 }
             }
         }
