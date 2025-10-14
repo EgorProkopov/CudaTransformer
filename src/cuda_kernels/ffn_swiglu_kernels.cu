@@ -17,6 +17,9 @@
 #define BLOCK_SIZE_M 8
 #endif
 
+#ifndef TILE_SIZE
+#define TILE_SIZE 32
+#endif
 
 // device functions
 
@@ -334,7 +337,80 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v3(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
+    __shared__ float x_s[TILE_SIZE][TILE_SIZE + 1];      // +1 to avoid bank conflicts
+    __shared__ float W_gate_s[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ float W_in_s[TILE_SIZE][TILE_SIZE + 1];
 
+    const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    const uint64_t x_offset = (uint64_t)row * (uint64_t)embedding_dim;
+    const uint64_t z_index = (uint64_t)row * (uint64_t)hidden_dim + col;
+
+    float sum_gate = 0.0f;
+    float sum_in = 0.0f;
+
+    // load tiles to shared memory and compute partial sums
+    for (uint32_t tile = 0; tile < (embedding_dim + TILE_SIZE - 1) / TILE_SIZE; ++tile) {
+        if (row < num_vectors && (tile * TILE_SIZE + threadIdx.x) < embedding_dim) {
+            x_s[threadIdx.y][threadIdx.x] = x[x_offset + tile * TILE_SIZE + threadIdx.x];
+        } else {
+            x_s[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        if ((tile * TILE_SIZE + threadIdx.y) < embedding_dim && col < hidden_dim) {
+            const uint64_t w_idx = (uint64_t)(tile * TILE_SIZE + threadIdx.y) * (uint64_t)hidden_dim + col;
+            W_gate_s[threadIdx.y][threadIdx.x] = W_gate[w_idx];
+            W_in_s[threadIdx.y][threadIdx.x] = W_in[w_idx];
+        } else {
+            W_gate_s[threadIdx.y][threadIdx.x] = 0.0f;
+            W_in_s[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        if (row < num_vectors && col < hidden_dim) {
+            #pragma unroll
+            for (uint32_t k = 0; k < TILE_SIZE; ++k) {
+                sum_gate = fmaf(x_s[threadIdx.y][k], W_gate_s[k][threadIdx.x], sum_gate);
+                sum_in = fmaf(x_s[threadIdx.y][k], W_in_s[k][threadIdx.x], sum_in);
+            }
+        }
+
+        __syncthreads();
+    }
+
+    // compute swiglu and dropout
+    if (row < num_vectors && col < hidden_dim) {
+        sum_gate += b_gate[col];
+        sum_in += b_in[col];
+        
+        // SwiGLU activation
+        float sigmoid = __fdividef(1.0f, 1.0f + __expf(-sum_gate));
+        float value = (sum_gate * sigmoid) * sum_in;
+
+        if (mask && p > 0.0f) {
+            curandStatePhilox4_32_10_t st;
+            curand_init(
+                (uint64_t)seed,
+                z_index,
+                (uint64_t)offset,
+                &st
+            );
+            float r = curand_uniform(&st);
+            uint8_t m = (r > p);
+            mask[z_index] = m;
+
+            float inv_dropout = 1.0f / (1.0f - p);
+            if (m) {
+                z[z_index] = value * inv_dropout;
+            } else {
+                z[z_index] = 0.0f;
+            }
+        } else {
+            z[z_index] = value;
+        }
+    }
 }
 
 
@@ -358,8 +434,232 @@ __global__ void ffn_residual_dropout_fp32_kernel_v3(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
+    __shared__ float z_s[TILE_SIZE][TILE_SIZE + 1];
+    __shared__ float W_out_s[TILE_SIZE][TILE_SIZE + 1];
+
+    const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    const uint64_t z_offset = (uint64_t)row * (uint64_t)hidden_dim;
+    const uint64_t y_index = (uint64_t)row * (uint64_t)embedding_dim + col;
+
+    float sum = 0.0f;
+
+    // load tiles to shared memory and compute partial sums
+    for (uint32_t tile = 0; tile < (hidden_dim + TILE_SIZE - 1) / TILE_SIZE; ++tile) {
+        if (row < num_vectors && (tile * TILE_SIZE + threadIdx.x) < hidden_dim) {
+            z_s[threadIdx.y][threadIdx.x] = z[z_offset + tile * TILE_SIZE + threadIdx.x];
+        } else {
+            z_s[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        if ((tile * TILE_SIZE + threadIdx.y) < hidden_dim && col < embedding_dim) {
+            const uint64_t w_idx = (uint64_t)(tile * TILE_SIZE + threadIdx.y) * (uint64_t)embedding_dim + col;
+            W_out_s[threadIdx.y][threadIdx.x] = W_out[w_idx];
+        } else {
+            W_out_s[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+
+        __syncthreads();
+
+        if (row < num_vectors && col < embedding_dim) {
+            #pragma unroll
+            for (uint32_t k = 0; k < TILE_SIZE; ++k) {
+                sum = fmaf(z_s[threadIdx.y][k], W_out_s[k][threadIdx.x], sum);
+            }
+        }
+
+        __syncthreads();
+    }
+
+    // compute residual and dropout
+    if (row < num_vectors && col < embedding_dim) {
+        float value = sum + b_out[col];
+        float res = residual[y_index];
+
+        if (mask && p > 0.0f) {
+            curandStatePhilox4_32_10_t st;
+            curand_init(
+                (uint64_t)seed,
+                y_index,
+                (uint64_t)offset,
+                &st
+            );
+            float r = curand_uniform(&st);
+            uint8_t m = (r > p);
+            mask[y_index] = m;
+
+            float inv_dropout = 1.0f / (1.0f - p);
+            if (m) {
+                value = value * inv_dropout;
+            } else {
+                value = 0.0f;
+            }
+        }
+        y[y_index] = value + res;
+    }
+}
+
+// ===========================================================================
+// =============================== v4 ========================================
+// ===========================================================================
+
+// 1st fwd-kernel v4: GEMM + SwiGLU + Dropout with RMEM tiling
+__global__ void ffn_swiglu_dropout_fp32_kernel_v4(
+    const float* __restrict__ x,           // input data to ffn block
+    float* __restrict__ z,                 // output data
+
+    const float* __restrict__ W_gate,      // weights for gating layer
+    const float* __restrict__ b_gate,      // bias for gating layer
+
+    const float* __restrict__ W_in,        // weights for input layer
+    const float* __restrict__ b_in,        // bias for input layer
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len      
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
 
 }
+
+
+// 2st fwd-kernel v4: GEMM + Residual + Dropout with RMEM tiling
+__global__ void ffn_residual_dropout_fp32_kernel_v4(
+    const float* __restrict__ residual,    // input data to ffn block
+    const float* __restrict__ z,           // input data from prev kernel
+    float* y,                              // output data
+
+    const float* __restrict__ W_out,       // second ffn layer weights
+    const float* __restrict__ b_out,       // second ffn layer bias
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
+
+}
+
+// ===========================================================================
+// =============================== v5 ========================================
+// ===========================================================================
+
+// 1st fwd-kernel v5: GEMM + SwiGLU + Dropout with fp16/bf16 support
+__global__ void ffn_swiglu_dropout_fp32_kernel_v5(
+    const float* __restrict__ x,           // input data to ffn block
+    float* __restrict__ z,                 // output data
+
+    const float* __restrict__ W_gate,      // weights for gating layer
+    const float* __restrict__ b_gate,      // bias for gating layer
+
+    const float* __restrict__ W_in,        // weights for input layer
+    const float* __restrict__ b_in,        // bias for input layer
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len      
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
+
+}
+
+
+// 2st fwd-kernel v5: GEMM + Residual + Dropout with fp16/bf16 support
+__global__ void ffn_residual_dropout_fp32_kernel_v5(
+    const float* __restrict__ residual,    // input data to ffn block
+    const float* __restrict__ z,           // input data from prev kernel
+    float* y,                              // output data
+
+    const float* __restrict__ W_out,       // second ffn layer weights
+    const float* __restrict__ b_out,       // second ffn layer bias
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
+
+}
+
+
+// ===========================================================================
+// =============================== v6 ========================================
+// ===========================================================================
+
+// 1st fwd-kernel v6: GEMM + SwiGLU + Dropout with tensor cores support
+__global__ void ffn_swiglu_dropout_fp32_kernel_v6(
+    const float* __restrict__ x,           // input data to ffn block
+    float* __restrict__ z,                 // output data
+
+    const float* __restrict__ W_gate,      // weights for gating layer
+    const float* __restrict__ b_gate,      // bias for gating layer
+
+    const float* __restrict__ W_in,        // weights for input layer
+    const float* __restrict__ b_in,        // bias for input layer
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len      
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
+
+}
+
+
+// 2st fwd-kernel v6: GEMM + Residual + Dropout with tensor cores support
+__global__ void ffn_residual_dropout_fp32_kernel_v6(
+    const float* __restrict__ residual,    // input data to ffn block
+    const float* __restrict__ z,           // input data from prev kernel
+    float* y,                              // output data
+
+    const float* __restrict__ W_out,       // second ffn layer weights
+    const float* __restrict__ b_out,       // second ffn layer bias
+
+    uint8_t* __restrict__ mask,            // dropout mask
+    const float p,                         // dropout rate
+    const uint32_t seed,                   // dropout seed
+    const uint32_t offset,                 // rnd offset
+
+    const uint32_t num_vectors,            // batch_size * seq_len
+
+    // vector shapes
+    const uint32_t embedding_dim,
+    const uint32_t hidden_dim
+){
+
+}
+
 
 
 // ===========================================================================
@@ -738,6 +1038,109 @@ torch::Tensor ffn_forward_fp32_kernel_v2(
 
 // backward wrapper
 
+// fwd v3 wrapper
+torch::Tensor ffn_forward_fp32_kernel_v3(
+    torch::Tensor x, 
+    
+    torch::Tensor W_gate,
+    torch::Tensor b_gate,
+    torch::Tensor W_in,
+    torch::Tensor b_in,
+    torch::Tensor W_out,
+    torch::Tensor b_out,
+
+    const float p,
+    const uint32_t seed
+){
+    c10::cuda::CUDAGuard device_guard(x.device());
+    check_device_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+    check_shape_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+    check_is_float_forward(
+        x, W_gate, b_gate, W_in, b_in, W_out, b_out
+    );
+
+    TORCH_CHECK(p >= 0.f && p < 1.f, "dropout p must be in [0,1), got ", p);
+
+    auto x_c = x.contiguous();
+
+    auto W_gate_c = W_gate.contiguous();
+    auto b_gate_c = b_gate.contiguous();
+
+    auto W_in_c = W_in.contiguous();
+    auto b_in_c = b_in.contiguous();
+
+    auto W_out_c = W_out.contiguous();
+    auto b_out_c = b_out.contiguous();
+
+    const uint32_t batch_size = x_c.size(0);
+    const uint32_t seq_len = x_c.size(1);
+    const uint32_t embedding_dim = x_c.size(2);
+    const uint32_t hidden_dim = W_gate_c.size(1);
+
+    const uint32_t num_vectors = batch_size * seq_len;
+
+    auto x2d = x_c.view({num_vectors, embedding_dim}); 
+    auto z = torch::empty({num_vectors, hidden_dim}, x_c.options());
+    auto y = torch::empty({num_vectors, embedding_dim}, x_c.options());
+
+    // dropout masks
+    torch::Tensor mask1, mask2;
+    uint8_t* mask1_ptr = nullptr;
+    uint8_t* mask2_ptr = nullptr;
+
+    if (p > 0.f) {
+        mask1 = torch::empty({num_vectors, hidden_dim}, x_c.options().dtype(torch::kUInt8));
+        mask2 = torch::empty({num_vectors, embedding_dim}, x_c.options().dtype(torch::kUInt8));
+        mask1_ptr = mask1.data_ptr<uint8_t>();
+        mask2_ptr = mask2.data_ptr<uint8_t>();
+    }
+
+    // launch configs
+    dim3 block1(TILE_SIZE, TILE_SIZE);
+    dim3 grid1(
+        (hidden_dim + TILE_SIZE - 1) / TILE_SIZE,
+        (num_vectors + TILE_SIZE - 1) / TILE_SIZE
+    );
+    dim3 block2(TILE_SIZE, TILE_SIZE);
+    dim3 grid2(
+        (embedding_dim + TILE_SIZE - 1) / TILE_SIZE,
+        (num_vectors + TILE_SIZE - 1) / TILE_SIZE
+    );
+
+    // Philox offsets
+    const uint64_t n1 = static_cast<uint64_t>(num_vectors) * static_cast<uint64_t>(hidden_dim);
+    const uint32_t offset1 = 0;
+    const uint32_t offset2 = static_cast<uint32_t>((n1 + 4 - 1) / 4);
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+    ffn_swiglu_dropout_fp32_kernel_v3<<<grid1, block1, 0, stream>>>(
+        x2d.data_ptr<float>(),
+        z.data_ptr<float>(),
+        W_gate_c.data_ptr<float>(), b_gate_c.data_ptr<float>(),
+        W_in_c.data_ptr<float>(),   b_in_c.data_ptr<float>(),
+        mask1_ptr, p, seed, offset1,
+        num_vectors, embedding_dim, hidden_dim
+    );
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: 1st kernel launch failed");
+
+    ffn_residual_dropout_fp32_kernel_v3<<<grid2, block2, 0, stream>>>(
+        x2d.data_ptr<float>(),
+        z.data_ptr<float>(),
+        y.data_ptr<float>(),
+        W_out_c.data_ptr<float>(),   b_out_c.data_ptr<float>(),
+        mask2_ptr, p, seed, offset2,
+        num_vectors, embedding_dim, hidden_dim
+    );
+
+    TORCH_CHECK(cudaGetLastError() == cudaSuccess, "FFN forward: 2nd kernel launch failed");
+
+    return y.view({batch_size, seq_len, embedding_dim});
+}
 
 
 // bindings
@@ -762,5 +1165,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("W_out"), py::arg("b_out"),
         py::arg("p") = 0.3, py::arg("seed") = 239,
         "FFN+SwiGLU with coalesced memory access GEMM realization"
+    );
+
+    m.def(
+        "forward_v3",
+        &ffn_forward_fp32_kernel_v3,
+        py::arg("x"),
+        py::arg("W_gate"), py::arg("b_gate"),
+        py::arg("W_in"), py::arg("b_in"),
+        py::arg("W_out"), py::arg("b_out"),
+        py::arg("p") = 0.3, py::arg("seed") = 239,
+        "FFN+SwiGLU with shared memory tiling GEMM realization"
     );
 }

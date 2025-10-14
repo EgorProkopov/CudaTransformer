@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.modules.ffn_swiglu import FFNSwiGLUv1, FFNSwiGLUv2
+from src.modules.ffn_swiglu import FFNSwiGLUv1, FFNSwiGLUv2, FFNSwiGLUv3
 
 WARM_UP_RUNS = 20
 ITERATIONS = 200
@@ -126,7 +126,7 @@ def torch_ffn_backward_benchmarks(
 if __name__ == "__main__":
     torch.manual_seed(239)
     device = "cuda"
-    batch_size, S, H, D = 64, 256, 2730, 1024
+    batch_size, S, H, D = 64, 256, 2048, 1024
     p = 0.0
 
     x = torch.randn(batch_size, S, H, device=device, dtype=torch.float32)
@@ -136,23 +136,28 @@ if __name__ == "__main__":
 
     v1 = FFNSwiGLUv1(H, D, p=p).to(device).train()
     v2 = FFNSwiGLUv2(H, D, p=p).to(device).train()
+    v3 = FFNSwiGLUv3(H, D, p=p).to(device).train()
 
     tie_weights_torch_to_custom(ref, v1)
     tie_weights_torch_to_custom(ref, v2)
+    tie_weights_torch_to_custom(ref, v3)
 
     ms_ref_fwd, y_ref = torch_ffn_forward_benchmarks(x, ref)
     ms_ref_fwd_cpu, y_ref_cpu = torch_ffn_forward_benchmarks(x.clone().to("cpu"), ref.to("cpu"))
     ms_v1_fwd,  y_v1  = custom_ffn_forward_benchmarks(x, v1)
     ms_v2_fwd,  y_v2  = custom_ffn_forward_benchmarks(x, v2)
+    ms_v3_fwd,  y_v3  = custom_ffn_forward_benchmarks(x, v3)
 
     maxdiff_v1 = (y_ref - y_v1).abs().max().item()
     maxdiff_v2 = (y_ref - y_v2).abs().max().item()
+    maxdiff_v3 = (y_ref - y_v3).abs().max().item()
 
     print(f"[FFN+SwiGLU] forward:")
     print(f"  torch (cpu) : {ms_ref_fwd_cpu:.3f} ms")
     print(f"  torch (cuda): {ms_ref_fwd:.3f} ms")
     print(f"  v1          : {ms_v1_fwd:.3f} ms | max|diff|={maxdiff_v1:.3e}")
     print(f"  v2          : {ms_v2_fwd:.3f} ms | max|diff|={maxdiff_v2:.3e}")
+    print(f"  v3          : {ms_v3_fwd:.3f} ms | max|diff|={maxdiff_v3:.3e}")
 
     ms_ref_bwd = torch_ffn_backward_benchmarks(dy, ref.to("cuda"), x)
     print(f"[FFN+SwiGLU] backward (torch only, p=0): {ms_ref_bwd:.3f} ms")
