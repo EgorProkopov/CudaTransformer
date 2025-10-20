@@ -29,6 +29,10 @@
 #define TILE_SIZE BLOCK_SIZE * CHUNCK_SIZE
 #endif
 
+#ifndef K_TILE
+#define K_TILE BLOCK_SIZE * CHUNCK_SIZE / 4
+#endif
+
 
 // device functions
 
@@ -773,16 +777,61 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
 // =============================== v5 ========================================
 // ===========================================================================
 
+template<typename T> struct MpTraits;
+
+template<> struct MpTraits<__half> {
+    using AccType = float;
+    using Vec2 = __half2;
+    static constexpr int VecSize = 2;
+    
+    static __device__ __forceinline__ __half from_float(float a) {
+        return __float2half(a);
+    }
+    static __device__ __forceinline__ float to_float(__half a) {
+        return __half2float(a);
+    }
+
+    static __device__ __forceinline__ Vec2 pack(__half a, __half b) {
+        return __halves2half2(a, b);
+    }
+    static __device__ __forceinline__ void unpack(Vec2 v, __half &a, __half &b) {
+        a = __low2half(v);
+        b = __high2half(v);
+    }
+};
+
+template<> struct MpTraits<__nv_bfloat16> {
+    using AccType = float;
+    using Vec2 = __nv_bfloat162;
+    static constexpr int VecSize = 2;
+    
+    static __device__ __forceinline__ __nv_bfloat16 from_float(float a) {
+        return __float2bfloat16(a);
+    }
+    static __device__ __forceinline__ float to_float(__nv_bfloat16 a){
+        return __bfloat162float(a);
+    }
+
+    static __device__ __forceinline__ Vec2 pack(__nv_bfloat16 a, __nv_bfloat16 b) {
+        return __nv_bfloat162(a, b);
+    }
+    static __device__ __forceinline__ void unpack(Vec2 v, __nv_bfloat16 &a, __nv_bfloat16 &b) {
+        a = __low2bfloat16(v);
+        b = __high2bfloat16(v);
+    }
+};
+
 // 1st fwd-kernel v5: GEMM + SwiGLU + Dropout with fp16/bf16 support
+template <typename T>
 __global__ void ffn_swiglu_dropout_fp32_kernel_v5(
-    const float* __restrict__ x,           // input data to ffn block
-    float* __restrict__ z,                 // output data
+    const T* __restrict__ x,           // input data to ffn block
+    T* __restrict__ z,                 // output data
 
-    const float* __restrict__ W_gate,      // weights for gating layer
-    const float* __restrict__ b_gate,      // bias for gating layer
+    const T* __restrict__ W_gate,      // weights for gating layer
+    const T* __restrict__ b_gate,      // bias for gating layer
 
-    const float* __restrict__ W_in,        // weights for input layer
-    const float* __restrict__ b_in,        // bias for input layer
+    const T* __restrict__ W_in,        // weights for input layer
+    const T* __restrict__ b_in,        // bias for input layer
 
     uint8_t* __restrict__ mask,            // dropout mask
     const float p,                         // dropout rate
@@ -795,18 +844,142 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v5(
     const uint32_t embedding_dim,
     const uint32_t hidden_dim
 ){
+    using V = typename MpTraits<T>::Vec2;
+    using AccT = typename MpTraits<T>::AccType;
+    static constexpr int VecSize = MpTraits<T>::VecSize;
 
+    static_assert(sizeof(V) == 4, "Vector size must be 4 bytes");
+
+    __shared__ V x_s[TILE_SIZE][K_TILE / VecSize];
+    __shared__ V W_gate_s[K_TILE][TILE_SIZE / VecSize];
+    __shared__ V W_in_s[K_TILE][TILE_SIZE / VecSize];
+
+    const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y * CHUNCK_SIZE;
+    const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
+
+    AccT sum_gate[CHUNCK_SIZE * CHUNCK_SIZE] = {0.0f};
+    AccT sum_in[CHUNCK_SIZE * CHUNCK_SIZE] = {0.0f};
+
+    const uint32_t tiles = (embedding_dim + K_TILE - 1) / K_TILE;
+
+    for (uint32_t tile = 0; tile < tiles; tile++){
+        // GMEM -> SMEM loading
+        #pragma unroll 1
+        for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
+            uint32_t r = row + i;
+            uint32_t c = tile * K_TILE + threadIdx.x * CHUNCK_SIZE;
+            
+            #pragma unroll 1
+            for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
+                if (r < num_vectors && (c + j) < embedding_dim){
+                    uint64_t x_index = (uint64_t)r * (uint64_t)embedding_dim + (uint64_t)(c + j);
+                    x_s[threadIdx.y * CHUNCK_SIZE + i][(threadIdx.x * CHUNCK_SIZE + j) / VecSize] = reinterpret_cast<const V*>(x)[x_index / VecSize];
+                } else {
+                    x_s[threadIdx.y * CHUNCK_SIZE + i][(threadIdx.x * CHUNCK_SIZE + j) / VecSize] = MpTraits<T>::pack(MpTraits<T>::from_float(0.0f), MpTraits<T>::from_float(0.0f));
+                }
+            }
+            for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
+                uint32_t w_r = tile * K_TILE + threadIdx.y * CHUNCK_SIZE + i;
+                uint32_t w_c = col + j;
+                V w_gate_value;
+                V w_in_value;
+                if (w_r < embedding_dim && w_c < hidden_dim){
+                    uint64_t w_index = (uint64_t)w_r * (uint64_t)hidden_dim + (uint64_t)w_c;
+                    w_gate_value = reinterpret_cast<const V*>(W_gate)[w_index / VecSize];
+                    w_in_value = reinterpret_cast<const V*>(W_in)[w_index / VecSize];
+                } else {
+                    w_gate_value = MpTraits<T>::pack(MpTraits<T>::from_float(0.0f), MpTraits<T>::from_float(0.0f));
+                    w_in_value = MpTraits<T>::pack(MpTraits<T>::from_float(0.0f), MpTraits<T>::from_float(0.0f));
+                }
+                W_gate_s[threadIdx.y * CHUNCK_SIZE + i][(threadIdx.x * CHUNCK_SIZE + j) / VecSize] = w_gate_value;
+                W_in_s[threadIdx.y * CHUNCK_SIZE + i][(threadIdx.x * CHUNCK_SIZE + j) / VecSize] = w_in_value;
+            }
+        }
+        __syncthreads();
+        // SMEM -> RMEM and partial sums computation
+        #pragma unroll 1
+        for (uint32_t k = 0; k < K_TILE; k++){
+            MpTraits<T>::Vec2 x_reg[CHUNCK_SIZE];
+            MpTraits<T>::Vec2 W_gate_reg[CHUNCK_SIZE];
+            MpTraits<T>::Vec2 W_in_reg[CHUNCK_SIZE];
+            
+            // SMEM -> RMEM
+            #pragma unroll 1
+            for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
+                x_reg[i] = x_s[threadIdx.y * CHUNCK_SIZE + i][k / VecSize];
+                W_gate_reg[i] = W_gate_s[k][(threadIdx.x * CHUNCK_SIZE + i) / VecSize];
+                W_in_reg[i] = W_in_s[k][(threadIdx.x * CHUNCK_SIZE + i) / VecSize];
+            }
+
+            // Partial sums computation
+            #pragma unroll 1
+            for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
+                #pragma unroll
+                for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
+                    T x_val, w_gate_val, w_in_val;
+                    MpTraits<T>::unpack(x_reg[i], x_val, w_gate_val);
+                    MpTraits<T>::unpack(W_gate_reg[j], w_gate_val, w_in_val);
+                    sum_gate[i * CHUNCK_SIZE + j] = fmaf(MpTraits<T>::to_float(x_val), MpTraits<T>::to_float(w_gate_val), sum_gate[i * CHUNCK_SIZE + j]);
+
+                    MpTraits<T>::unpack(W_in_reg[j], w_gate_val, w_in_val);
+                    sum_in[i * CHUNCK_SIZE + j] = fmaf(MpTraits<T>::to_float(x_val), MpTraits<T>::to_float(w_in_val), sum_in[i * CHUNCK_SIZE + j]);
+                }
+            }
+            __syncthreads();
+        }
+
+        // Compute swiglu and dropout
+        #pragma unroll 1
+        for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
+            uint32_t r = row + i;
+            if (r >= num_vectors) continue;
+            #pragma unroll 1
+            for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
+                uint32_t c = col + j;
+                if (c >= hidden_dim) continue;
+                AccT sum_gate_value = sum_gate[i * CHUNCK_SIZE + j] + b_gate[c];
+                AccT sum_in_value = sum_in[i * CHUNCK_SIZE + j] + b_in[c]; 
+                
+                // swiglu activation
+                AccT sigmoid = __fdividef(1.0f, 1.0f + __expf(-sum_gate_value));
+                AccT value = (sum_gate_value * sigmoid) * sum_in_value;
+
+                uint64_t z_index = (uint64_t)r * (uint64_t)hidden_dim + (uint64_t)c;
+                curandStatePhilox4_32_10_t st;
+                if (mask && p > 0.0f){
+                    curand_init(
+                        (uint64_t)seed,
+                        z_index,
+                        (uint64_t)offset,
+                        &st
+                    );
+                    float r = curand_uniform(&st);
+                    uint8_t m = (r > p);
+                    mask[z_index] = m;
+                    float inv_dropout = 1.0f / (1.0f - p);
+                    if (m){
+                        z[z_index] = MpTraits<T>::from_float(value * inv_dropout);
+                    } else {
+                        z[z_index] = MpTraits<T>::from_float(0.0f);
+                    }
+                } else {
+                    z[z_index] = MpTraits<T>::from_float(value);
+                }
+            }
+        }
+    }
 }
 
 
 // 2st fwd-kernel v5: GEMM + Residual + Dropout with fp16/bf16 support
+template <typename T>
 __global__ void ffn_residual_dropout_fp32_kernel_v5(
-    const float* __restrict__ residual,    // input data to ffn block
-    const float* __restrict__ z,           // input data from prev kernel
-    float* y,                              // output data
+    const T* __restrict__ residual,    // input data to ffn block
+    const T* __restrict__ z,           // input data from prev kernel
+    T* y,                              // output data
 
-    const float* __restrict__ W_out,       // second ffn layer weights
-    const float* __restrict__ b_out,       // second ffn layer bias
+    const T* __restrict__ W_out,       // second ffn layer weights
+    const T* __restrict__ b_out,       // second ffn layer bias
 
     uint8_t* __restrict__ mask,            // dropout mask
     const float p,                         // dropout rate
