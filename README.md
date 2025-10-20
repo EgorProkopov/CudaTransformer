@@ -22,7 +22,7 @@ src/
   - Realized naive matmul version
   - Realized coalesced memory access version
   - SMEM tiling
-  - Registers 2D tiling (work in progress)
+  - Registers 2D tiling
   - fp16/bf16 support with vector access to GMEM/SMEM/registers (work in progreess)
   - tensor cores support (work in progreess)
   - double buffer and async tiles loading (work in progreess)
