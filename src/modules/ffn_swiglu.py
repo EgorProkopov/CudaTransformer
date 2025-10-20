@@ -26,7 +26,7 @@ def load_cuda_extension():
         sources=[str(cu_path)],
         extra_cflags=extra_nvcc_flags,
         extra_cuda_cflags=extra_cuda_flags,
-        verbose=False
+        verbose=True
     )
 
 

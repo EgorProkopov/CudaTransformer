@@ -22,7 +22,7 @@
 #endif
 
 #ifndef CHUNCK_SIZE
-#define CHUNCK_SIZE 2
+#define CHUNCK_SIZE 1
 #endif
 
 #ifndef TILE_SIZE
@@ -549,19 +549,20 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
 
     for (uint32_t tile = 0; tile < tiles; tile++){
         // GMEM -> SMEM loading
-        #pragma unroll
+        #pragma unroll 1
         for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
             uint32_t r = row + i;
             uint32_t c = tile * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
             
-            #pragma unroll
+            #pragma unroll 1
             for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
                 if (r < num_vectors && (c + j) < embedding_dim){
                     x_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = x[(uint64_t)r * (uint64_t)embedding_dim + (uint64_t)(c + j)];
                 } else {
                     x_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = 0.0f;
                 }
-
+            }
+            for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
                 uint32_t w_r = tile * TILE_SIZE + threadIdx.y * CHUNCK_SIZE + i;
                 uint32_t w_c = col + j;
                 float w_gate_value = 0.0f;
@@ -578,14 +579,14 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
         __syncthreads();
 
         // SMEM -> RMEM and partial sums computation
-        #pragma unroll
+        #pragma unroll 1
         for (uint32_t k = 0; k < TILE_SIZE; k++){
             float x_reg[CHUNCK_SIZE];
             float W_gate_reg[CHUNCK_SIZE];
             float W_in_reg[CHUNCK_SIZE];
 
             // SMEM -> RMEM
-            #pragma unroll
+            #pragma unroll 1
             for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
                 x_reg[i] = x_s[threadIdx.y * CHUNCK_SIZE + i][k];
                 W_gate_reg[i] = W_gate_s[k][threadIdx.x * CHUNCK_SIZE + i];
@@ -593,7 +594,7 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
             }
 
             // Partial sums computation
-            #pragma unroll
+            #pragma unroll 1
             for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
                 #pragma unroll
                 for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
@@ -606,24 +607,24 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v4(
     }
 
     // Compute swiglu and dropout
-    #pragma unroll
+    #pragma unroll 1
     for (uint32_t i = 0; i < CHUNCK_SIZE; i++){
         uint32_t r = row + i;
         if (r >= num_vectors) continue;
-        #pragma unroll
+        #pragma unroll 1
         for (uint32_t j = 0; j < CHUNCK_SIZE; j++){
             uint32_t c = col + j;
             if (c >= hidden_dim) continue;
-            sum_gate[i * CHUNCK_SIZE + j] += b_gate[c];
-            sum_in[i * CHUNCK_SIZE + j] += b_in[c];
+            float sum_gate_value = sum_gate[i * CHUNCK_SIZE + j] + b_gate[c];
+            float sum_in_value = sum_in[i * CHUNCK_SIZE + j] + b_in[c];
 
             // swiglu activation
-            float sigmoid = __fdividef(1.0f, 1.0f + __expf(-sum_gate[i * CHUNCK_SIZE + j]));
-            float value = (sum_gate[i * CHUNCK_SIZE + j] * sigmoid) * sum_in[i * CHUNCK_SIZE + j];
+            float sigmoid = __fdividef(1.0f, 1.0f + __expf(-sum_gate_value));
+            float value = (sum_gate_value * sigmoid) * sum_in_value;
 
             uint64_t z_index = (uint64_t)r * (uint64_t)hidden_dim + (uint64_t)c;
+            curandStatePhilox4_32_10_t st;
             if (mask && p > 0.0f){
-                curandStatePhilox4_32_10_t st;
                 curand_init(
                     (uint64_t)seed,
                     z_index,
@@ -678,24 +679,25 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
 
     for (uint32_t tile = 0; tile < tiles; tile++) {
         // GMEM -> SMEM loading
-        #pragma unroll
+        #pragma unroll 1
         for (uint32_t i = 0; i < CHUNCK_SIZE; i++) {
             uint32_t r = row + i;
             uint32_t c = tile * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
             
-            #pragma unroll
+            #pragma unroll 1
             for (uint32_t j = 0; j < CHUNCK_SIZE; j++) {
                 if (r < num_vectors && (c + j) < hidden_dim) {
                     z_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = z[(uint64_t)r * (uint64_t)hidden_dim + (uint64_t)(c + j)];
                 } else {
                     z_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = 0.0f;
                 }
-
+            }
+            for (uint32_t j = 0; j < CHUNCK_SIZE; j++) {
                 uint32_t w_r = tile * TILE_SIZE + threadIdx.y * CHUNCK_SIZE + i;
                 uint32_t w_c = col + j;
                 float w_value = 0.0f;
                 if (w_r < hidden_dim && w_c < embedding_dim) {
-                    uint64_t w_index = (uint64_t)w_r * (uint64_t)embedding_dim + (uint64_t)w_c;
+                    uint32_t w_index = w_r * embedding_dim + w_c;
                     w_value = W_out[w_index];
                 }
                 W_out_s[threadIdx.y * CHUNCK_SIZE + i][threadIdx.x * CHUNCK_SIZE + j] = w_value;
@@ -704,7 +706,7 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
         __syncthreads();
 
         // SMEM -> RMEM and partial sums computation
-        #pragma unroll
+        #pragma unroll 1
         for (uint32_t k = 0; k < TILE_SIZE; k++) {
             float z_reg[CHUNCK_SIZE];
             float W_out_reg[CHUNCK_SIZE];
@@ -717,7 +719,7 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
             }
 
             // partial sums computation
-            #pragma unroll
+            #pragma unroll 1
             for (uint32_t i = 0; i < CHUNCK_SIZE; i++) {
                 #pragma unroll
                 for (uint32_t j = 0; j < CHUNCK_SIZE; j++) {
@@ -729,22 +731,22 @@ __global__ void ffn_residual_dropout_fp32_kernel_v4(
     }
 
     // Output with residual connection and dropout
-    #pragma unroll
+    #pragma unroll 1
     for (uint32_t i = 0; i < CHUNCK_SIZE; i++) {
         uint32_t r = row + i;
         if (r >= num_vectors) continue;
 
-        #pragma unroll
+        #pragma unroll 1
         for (uint32_t j = 0; j < CHUNCK_SIZE; j++) {
             uint32_t c = col + j;
             if (c >= embedding_dim) continue;
 
-            uint64_t y_index = (uint64_t)r * (uint64_t)embedding_dim + (uint64_t)c;
+            uint32_t y_index = r * embedding_dim + c;
             float value = sum[i * CHUNCK_SIZE + j] + b_out[c];
             float res = residual[y_index];
 
+            curandStatePhilox4_32_10_t st;
             if (mask && p > 0.0f) {
-                curandStatePhilox4_32_10_t st;
                 curand_init(
                     (uint64_t)seed,
                     y_index,
