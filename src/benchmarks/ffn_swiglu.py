@@ -5,7 +5,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.modules.ffn_swiglu import FFNSwiGLUv1, FFNSwiGLUv2, FFNSwiGLUv3, FFNSwiGLUv4
+from src.modules.ffn_swiglu import (
+    FFNSwiGLUv1, FFNSwiGLUv2, FFNSwiGLUv3, FFNSwiGLUv4, FFNSwiGLUv5
+)
 
 WARM_UP_RUNS = 5
 ITERATIONS = 10
@@ -138,12 +140,21 @@ if __name__ == "__main__":
     v2 = FFNSwiGLUv2(H, D, p=p).to(device).train()
     v3 = FFNSwiGLUv3(H, D, p=p).to(device).train()
     v4 = FFNSwiGLUv4(H, D, p=p).to(device).train()
+    v5_fp16 = FFNSwiGLUv5(H, D, p=p, dtype=torch.float16).to(device).train()
+    v5_bf16 = FFNSwiGLUv5(H, D, p=p, dtype=torch.bfloat16).to(device).train()
 
     tie_weights_torch_to_custom(ref, v1)
     tie_weights_torch_to_custom(ref, v2)
     tie_weights_torch_to_custom(ref, v3)
     tie_weights_torch_to_custom(ref, v4)
+    with torch.cuda.amp.autocast(dtype=torch.float16):
+        ref_fp16 = ref.to(torch.float16)
+        tie_weights_torch_to_custom(ref_fp16, v5_fp16)
+    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        ref_bf16 = ref.to(torch.bfloat16)
+        tie_weights_torch_to_custom(ref_bf16, v5_bf16)
 
+    # FP32 benchmarks
     ms_ref_fwd, y_ref = torch_ffn_forward_benchmarks(x, ref)
     ms_ref_fwd_cpu, y_ref_cpu = torch_ffn_forward_benchmarks(x.clone().to("cpu"), ref.to("cpu"))
     ms_v1_fwd,  y_v1  = custom_ffn_forward_benchmarks(x, v1)
@@ -151,12 +162,27 @@ if __name__ == "__main__":
     ms_v3_fwd,  y_v3  = custom_ffn_forward_benchmarks(x, v3)
     ms_v4_fwd,  y_v4  = custom_ffn_forward_benchmarks(x, v4)
 
+    # FP16/BF16 benchmarks
+    x_fp16 = x.to(torch.float16)
+    x_bf16 = x.to(torch.bfloat16)
+    with torch.cuda.amp.autocast(dtype=torch.float16):
+        ms_ref_fp16_fwd, y_ref_fp16 = torch_ffn_forward_benchmarks(x_fp16, ref_fp16)
+    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        ms_ref_bf16_fwd, y_ref_bf16 = torch_ffn_forward_benchmarks(x_bf16, ref_bf16)
+    ms_v5_fp16_fwd, y_v5_fp16 = custom_ffn_forward_benchmarks(x_fp16, v5_fp16)
+    ms_v5_bf16_fwd, y_v5_bf16 = custom_ffn_forward_benchmarks(x_bf16, v5_bf16)
+
+    # FP32 diffs
     maxdiff_v1 = (y_ref - y_v1).abs().max().item()
     maxdiff_v2 = (y_ref - y_v2).abs().max().item()
     maxdiff_v3 = (y_ref - y_v3).abs().max().item()
     maxdiff_v4 = (y_ref - y_v4).abs().max().item()
 
-    print(f"[FFN+SwiGLU] forward:")
+    # FP16/BF16 diffs (comparing to corresponding torch implementations)
+    maxdiff_v5_fp16 = (y_ref_fp16 - y_v5_fp16.to(y_ref_fp16.dtype)).abs().max().item()
+    maxdiff_v5_bf16 = (y_ref_bf16 - y_v5_bf16.to(y_ref_bf16.dtype)).abs().max().item()
+
+    print(f"[FFN+SwiGLU] forward (FP32):")
     print(f"  torch (cpu) : {ms_ref_fwd_cpu:.3f} ms")
     print(f"  torch (cuda): {ms_ref_fwd:.3f} ms")
     print(f"  v1          : {ms_v1_fwd:.3f} ms | max|diff|={maxdiff_v1:.3e}")
@@ -164,5 +190,11 @@ if __name__ == "__main__":
     print(f"  v3          : {ms_v3_fwd:.3f} ms | max|diff|={maxdiff_v3:.3e}")
     print(f"  v4          : {ms_v4_fwd:.3f} ms | max|diff|={maxdiff_v4:.3e}")
 
+    print(f"\n[FFN+SwiGLU] forward (FP16/BF16):")
+    print(f"  torch (fp16): {ms_ref_fp16_fwd:.3f} ms")
+    print(f"  torch (bf16): {ms_ref_bf16_fwd:.3f} ms")
+    print(f"  v5 (fp16)   : {ms_v5_fp16_fwd:.3f} ms | max|diff|={maxdiff_v5_fp16:.3e}")
+    print(f"  v5 (bf16)   : {ms_v5_bf16_fwd:.3f} ms | max|diff|={maxdiff_v5_bf16:.3e}")
+
     ms_ref_bwd = torch_ffn_backward_benchmarks(dy, ref.to("cuda"), x)
-    print(f"[FFN+SwiGLU] backward (torch only, p=0): {ms_ref_bwd:.3f} ms")
+    print(f"\n[FFN+SwiGLU] backward (torch only, p=0): {ms_ref_bwd:.3f} ms")

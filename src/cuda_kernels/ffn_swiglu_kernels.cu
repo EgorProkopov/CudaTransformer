@@ -850,9 +850,9 @@ __global__ void ffn_swiglu_dropout_fp32_kernel_v5(
 
     static_assert(sizeof(V) == 4, "Vector size must be 4 bytes");
 
-    __shared__ V x_s[TILE_SIZE][div_up(K_TILE, VecSize)];
-    __shared__ V W_gate_s[K_TILE][div_up(TILE_SIZE, VecSize)];
-    __shared__ V W_in_s[K_TILE][div_up(TILE_SIZE, VecSize)];
+    __shared__ V x_s[TILE_SIZE][(K_TILE + VecSize - 1) / VecSize];
+    __shared__ V W_gate_s[K_TILE][(TILE_SIZE + VecSize - 1) / VecSize];
+    __shared__ V W_in_s[K_TILE][(TILE_SIZE + VecSize - 1) / VecSize];
 
     const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y * CHUNCK_SIZE;
     const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
@@ -1041,8 +1041,8 @@ __global__ void ffn_residual_dropout_fp32_kernel_v5(
 
     static_assert(sizeof(V) == 4, "Vector size must be 4 bytes");
 
-    __shared__ V z_s[TILE_SIZE][div_up(K_TILE, VecSize)];
-    __shared__ V W_out_s[K_TILE][div_up(TILE_SIZE, VecSize)];
+    __shared__ V z_s[TILE_SIZE][(K_TILE + VecSize - 1) / VecSize];
+    __shared__ V W_out_s[K_TILE][(TILE_SIZE + VecSize - 1) / VecSize];
 
     const uint32_t row = blockIdx.y * TILE_SIZE + threadIdx.y * CHUNCK_SIZE;
     const uint32_t col = blockIdx.x * TILE_SIZE + threadIdx.x * CHUNCK_SIZE;
@@ -1892,45 +1892,50 @@ torch::Tensor ffn_forward_kernel_v5(
     return y.view({batch_size, seq_len, embedding_dim});
 }
 
-torch::Tensor ffn_forward_kernel_v5(
-    torch::Tensor x,
-    torch::Tensor W_gate,
-    torch::Tensor b_gate,
-    torch::Tensor W_in,
-    torch::Tensor b_in,
-    torch::Tensor W_out,
-    torch::Tensor b_out,
-    const float p,
-    const uint32_t seed
-) {
-    switch (x.scalar_type()) {
-        case at::ScalarType::Half:
-            return ffn_forward_kernel_v5<__half>(x, W_gate, b_gate, W_in, b_in, W_out, b_out, p, seed);
-        case at::ScalarType::BFloat16:
-            return ffn_forward_kernel_v5<__nv_bfloat16>(x, W_gate, b_gate, W_in, b_in, W_out, b_out, p, seed);
-        case at::ScalarType::Float:
-            TORCH_CHECK(false, "FFN v5: FP32 is not supported, use kernels v1-v4 instead");
-        default:
-            TORCH_CHECK(false, "FFN v5: Unsupported data type");
-    }
-}
-
-// fwd v6 wrapper
-torch::Tensor ffn_forward_fp32_kernel_v6(
-    torch::Tensor x, 
-    
-    torch::Tensor W_gate,
-    torch::Tensor b_gate,
-    torch::Tensor W_in,
-    torch::Tensor b_in,
-    torch::Tensor W_out,
-    torch::Tensor b_out,
-
+torch::Tensor ffn_forward_kernel_v5_fp16(
+    at::Tensor x,
+    at::Tensor W_gate,
+    at::Tensor b_gate,
+    at::Tensor W_in,
+    at::Tensor b_in,
+    at::Tensor W_out,
+    at::Tensor b_out,
     const float p,
     const uint32_t seed
 ){
-
+    return ffn_forward_kernel_v5<__half>(x, W_gate, b_gate, W_in, b_in, W_out, b_out, p, seed);
 }
+
+torch::Tensor ffn_forward_kernel_v5_bf16(
+    at::Tensor x,
+    at::Tensor W_gate,
+    at::Tensor b_gate,
+    at::Tensor W_in,
+    at::Tensor b_in,
+    at::Tensor W_out,
+    at::Tensor b_out,
+    const float p,
+    const uint32_t seed
+){
+    return ffn_forward_kernel_v5<__nv_bfloat16>(x, W_gate, b_gate, W_in, b_in, W_out, b_out, p, seed);
+}
+
+// fwd v6 wrapper
+// torch::Tensor ffn_forward_fp32_kernel_v6(
+//    torch::Tensor x, 
+//    
+//    torch::Tensor W_gate,
+//    torch::Tensor b_gate,
+//    torch::Tensor W_in,
+//    torch::Tensor b_in,
+//    torch::Tensor W_out,
+//    torch::Tensor b_out,
+//
+//    const float p,
+//    const uint32_t seed
+//){
+//
+//}
 
 
 
@@ -1983,14 +1988,24 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "FFN+SwiGLU with register tiling GEMM realization"
     );
 
-        m.def(
-        "forward_v5",
-        &ffn_forward_kernel_v5,
+    m.def(
+        "forward_v5_fp16",
+        &ffn_forward_kernel_v5_fp16,
         py::arg("x"),
         py::arg("W_gate"), py::arg("b_gate"),
         py::arg("W_in"), py::arg("b_in"),
         py::arg("W_out"), py::arg("b_out"),
         py::arg("p") = 0.3, py::arg("seed") = 239,
-        "FFN+SwiGLU with fp16/bf16 support and vectorization"
+        "FFN+SwiGLU with fp16 support and vectorization"
+    );
+    m.def(
+        "forward_v5_bf16",
+        &ffn_forward_kernel_v5_bf16,
+        py::arg("x"),
+        py::arg("W_gate"), py::arg("b_gate"),
+        py::arg("W_in"), py::arg("b_in"),
+        py::arg("W_out"), py::arg("b_out"),
+        py::arg("p") = 0.3, py::arg("seed") = 239,
+        "FFN+SwiGLU with bf16 support and vectorization"
     );
 }

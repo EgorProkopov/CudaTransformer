@@ -41,11 +41,20 @@ class FFNSwiGLUv1Function(torch.autograd.Function):
         W_in: torch.Tensor, b_in: torch.Tensor,
         W_out: torch.Tensor, b_out: torch.Tensor,
         p: float, seed: int
-    ) -> torch.Tensor:
-        y = _ffn_swiglu_extension.forward_v1(
-            x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
-        )
-        ctx.save_for_backward()
+    ):
+        # Use the appropriate forward version based on dtype
+        if x.dtype == torch.float16:
+            y = _ffn_swiglu_extension.forward_v5_fp16(
+                x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
+            )
+        elif x.dtype == torch.bfloat16:
+            y = _ffn_swiglu_extension.forward_v5_bf16(
+                x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
+            )
+        else:
+            raise ValueError("FFNSwiGLUv5 only supports FP16 and BF16 dtypes")
+        
+        ctx.save_for_backward(x, W_gate, b_gate, W_in, b_in, W_out, b_out)
         ctx.p = p
         ctx.seed = seed
         return y
@@ -54,7 +63,8 @@ class FFNSwiGLUv1Function(torch.autograd.Function):
     def backward(
         ctx, *grad_outputs
     ) -> tuple[torch.Tensor, Optional[None], Optional[None], Optional[None], Optional[None], Optional[None], Optional[None]]:
-        pass
+        # FFNSwiGLUv5 backward pass not implemented yet
+        raise NotImplementedError("FFNSwiGLUv5 backward pass is not implemented yet")
 
 
 
@@ -237,6 +247,62 @@ class FFNSwiGLUv4(nn.Module):
         if self.training and self.p > 0.0: p = self.p
         else: p = 0.0
         return FFNSwiGLUv4Function.apply(
+            x, self.W_gate, self.b_gate, self.W_in, self.b_in, self.W_out, self.b_out,
+            float(p), int(self.seed)
+        )
+
+
+class FFNSwiGLUv5Function(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx, x: torch.Tensor,
+        W_gate: torch.Tensor, b_gate: torch.Tensor,
+        W_in: torch.Tensor, b_in: torch.Tensor,
+        W_out: torch.Tensor, b_out: torch.Tensor,
+        p: float, seed: int
+    ):
+        y = _ffn_swiglu_extension.forward_v5(
+            x, W_gate, b_gate, W_in, b_in, W_out, b_out, float(p), int(seed)
+        )
+        ctx.save_for_backward()
+        ctx.p = p
+        ctx.seed = seed
+        return y
+
+    @staticmethod
+    def backward(
+        ctx, *grad_outputs
+    ) -> tuple[torch.Tensor, Optional[None], Optional[None], Optional[None], Optional[None], Optional[None], Optional[None]]:
+        pass
+
+
+class FFNSwiGLUv5(nn.Module):
+    def __init__(self, embedding_dim: int, hidden_dim: int, p: float = 0.0, seed: int = 239, dtype: torch.dtype = torch.float16):
+        super().__init__()
+        self.embedding_dim = int(embedding_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.p = float(p)
+        self.seed = int(seed)
+
+        # Use specified reduced precision dtype (fp16 or bf16)
+        self.W_gate = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim, dtype=dtype))
+        self.b_gate = nn.Parameter(torch.zeros(self.hidden_dim, dtype=dtype))
+        self.W_in = nn.Parameter(torch.empty(self.embedding_dim, self.hidden_dim, dtype=dtype))
+        self.b_in = nn.Parameter(torch.zeros(self.hidden_dim, dtype=dtype))
+        self.W_out = nn.Parameter(torch.empty(self.hidden_dim, self.embedding_dim, dtype=dtype))
+        self.b_out = nn.Parameter(torch.zeros(self.embedding_dim, dtype=dtype))
+
+        nn.init.xavier_uniform_(self.W_gate)
+        nn.init.xavier_uniform_(self.W_in)
+        nn.init.xavier_uniform_(self.W_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training and self.p > 0.0: p = self.p
+        else: p = 0.0
+        # Convert input to same dtype as weights if needed
+        if x.dtype != self.W_gate.dtype:
+            x = x.to(self.W_gate.dtype)
+        return FFNSwiGLUv5Function.apply(
             x, self.W_gate, self.b_gate, self.W_in, self.b_in, self.W_out, self.b_out,
             float(p), int(self.seed)
         )
