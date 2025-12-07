@@ -17,13 +17,15 @@ src/
   - Realized only for fp32
   - Realized via warp-on-row calculation
   - TODO: realize for fp16/bf16 with vectorized memory access and block-on-row calculation  
-- Embeddings layer: work in progress
-- FFN with SwiGLU: step-by-step optimizations for 2 kernels (gemm-swiglu-dropout and gemm-residual-dropout)
-  - Realized naive matmul version
+- Embeddings layer
+  - Realized only for fp32
+  - TODO: realize for fp16/bf16
+- FFN with SwiGLU and dropout: step-by-step optimizations for 2 kernels (gemm-swiglu-dropout and gemm-residual-dropout)
+  - Realized naive GEMM version
   - Realized coalesced memory access version
   - SMEM tiling
   - Registers 2D tiling
-  - fp16/bf16 support with vector access to GMEM/SMEM/registers (work in progreess)
+  - fp16/bf16 support with vector access to GMEM/SMEM/registers (work in progreess, unstable)
   - tensor cores support (work in progreess)
   - double buffer and async tiles loading (work in progreess)
 
